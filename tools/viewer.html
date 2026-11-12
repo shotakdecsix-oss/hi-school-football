@@ -25,11 +25,18 @@
 </div>
 <svg id="sv" preserveAspectRatio="xMidYMid meet"></svg>
 <script type="module">
-import { createMatch, stepMatch, frame } from '../engine/match.js';
-import { sampleInput } from '../engine/sample.js';
-import { DT, TICK_HZ } from '../engine/consts.js';
-import { FORMATIONS } from '../data/formations.js';
-import { VIEWBOX, pitchSvg, actorsSvg, lerpFrame } from '../render/view2d.js';
+// 読み込みに失敗したとき画面にエラーが出るよう、動的importにしている
+let mods;
+try {
+  mods = await Promise.all([
+    import('../engine/match.js'), import('../engine/sample.js'), import('../engine/consts.js'),
+    import('../data/formations.js'), import('../render/view2d.js'),
+  ]);
+} catch (e) {
+  document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
+  throw e;
+}
+const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));

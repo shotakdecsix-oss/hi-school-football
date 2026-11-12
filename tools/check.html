@@ -16,9 +16,6 @@
 <button id="run">実行</button>
 <div id="out"></div>
 <script type="module">
-import { computeGolden, GOLDEN_SPEC } from './golden-core.js';
-import { FULL_TICKS } from '../engine/consts.js';
-
 const out = document.getElementById('out');
 const log = (s, c) => { const e = document.createElement('div'); if (c) e.className = c; e.textContent = s; out.append(e); };
 
@@ -26,7 +23,12 @@ document.getElementById('run').onclick = async () => {
   out.textContent = '';
   log(navigator.userAgent, 'dim');
   try {
-    const gold = await (await fetch('golden.json', { cache: 'no-store' })).json();
+    // 読み込みに失敗したとき画面にエラーが出るよう、importはここで行う
+    const { computeGolden, GOLDEN_SPEC } = await import('./golden-core.js');
+    const { FULL_TICKS } = await import('../engine/consts.js');
+    const res = await fetch('golden.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('golden.json が読めない (' + res.status + ')');
+    const gold = await res.json();
     const t0 = performance.now();
     const now = await computeGolden(GOLDEN_SPEC, async (seed, T) => {
       log(`  種${seed} tick ${T} まで計算`, 'dim');

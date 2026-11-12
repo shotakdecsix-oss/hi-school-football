@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 5;
+export const ENGINE_VERSION = 6;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -45,15 +45,21 @@ export const I = {
   PLANK: G + 18, // チームごとの役割割り当ての鍵（2つ）
   KICKT: G + 20, // 直近にボールが蹴られた・弾かれた tick（守備側の反応の遅れの起点）
   GOT: G + 21, // 今の保持者がボールをコントロールした tick（持ち続けた時間の起点）
-  ST: G + 22, // 統計: チームごとに ST_N 個
+  SETP: G + 22, // 再開（セットプレー）の種類（SP）。0 = 通常のプレー中。ボールが蹴られるまで続く
+  TAKER: G + 23, // 再開を行う選手
+  ST: G + 24, // 統計: チームごとに ST_N 個
 };
-export const ST_N = 12;
-export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11 };
+export const ST_N = 15;
+export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11, THROW: 12, GKICK: 13, CORNER: 14 };
 export const N_LEN = I.ST + 2 * ST_N;
 export const PHASE = { LIVE: 0, PAUSE: 1, END: 2 };
 export const NEXT = { KICKOFF: 0, RESTART: 1 };
-// 出来事の記録 [t, 種類, ...]。HALF=前半/延長前半が終わった [t,4,得点0,得点1]、ET=延長に入る、PK=PK戦に入る、FULL=試合終了
-export const EV = { GOAL: 1, SHOT: 2, OUT: 3, HALF: 4, FULL: 5, SAVE: 6, ET: 7, PK: 8, PKK: 9, SUB: 10 };
+// 再開の種類。止まっている間（PAUSE）に、蹴る選手がボールの位置へ向かい、相手は離れる。待ち時間は種類ごと（tick）
+export const SP = { NONE: 0, THROW: 1, GKICK: 2, CORNER: 3 };
+export const SP_WAIT = [0, 100, 140, 200], GOAL_WAIT = 160;
+// 出来事の記録 [t, 種類, ...]。HALF=前半/延長前半が終わった [t,4,得点0,得点1]、ET=延長に入る、PK=PK戦に入る、FULL=試合終了、
+// OUT=ボールが出た [t,3,出た方向,再開するチーム]、RESTART=再開した [t,11,種類(SP),蹴る選手]
+export const EV = { GOAL: 1, SHOT: 2, OUT: 3, HALF: 4, FULL: 5, SAVE: 6, ET: 7, PK: 8, PKK: 9, SUB: 10, RESTART: 11 };
 
 // 選手の役割（その場の動き方）
 export const ACT = { HOME: 0, CARRY: 1, PRESS: 2, COVER: 3, MARK: 4, SUPPORT: 5, RUN: 6, RECV: 7, FOLLOW: 8, CHASE: 9 };

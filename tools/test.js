@@ -8,7 +8,7 @@ import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
 import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP } from '../engine/consts.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
 
@@ -201,7 +201,7 @@ await test('rules: 規定の長さで終わる。同点でもノックアウト�
 });
 await test('rules: ノックアウト戦は、同点なら延長（前後半）に入り、決着していれば入らない。延長をまたぐ保存・復元も一致', () => {
   let nExtra = 0, nReg = 0;
-  for (let seed = 1; seed <= 14; seed++) {
+  for (let seed = 1; seed <= 80 && (nExtra < 3 || nReg < 2); seed++) { // 4分では決着する試合が少ないので、両方の場合が出るまで種を変えて試す
     const m = mkR(seed, SHORT), input = m.input;
     run(m, m.pEnd[1]);
     const s0 = m.N[I.SCORE], s1 = m.N[I.SCORE + 1], ets = m.log.filter((e) => e[1] === EV.ET);
@@ -223,7 +223,38 @@ await test('rules: ノックアウト戦は、同点なら延長（前後半）�
     assert.equal(digestMatch(fresh), D, '延長をまたぐ復元');
   }
   assert.ok(nExtra >= 1 && nReg >= 1, `延長に入った試合 ${nExtra}、規定の時間で決着した試合 ${nReg}`);
-  return `14試合: 延長 ${nExtra}、決着 ${nReg}`;
+  return `延長 ${nExtra}、決着 ${nReg}`;
+});
+
+// ── 再開（スローイン・ゴールキック・コーナー）──
+await test('restart: 再開は正しいチームの選手がボールを持って始め、相手は規定の距離（スロー2m・コーナー9.15m・GKはエリア外）の外', () => {
+  const cnt = [0, 0, 0, 0];
+  for (let seed = 1; seed <= 4; seed++) {
+    const m = mk(seed);
+    let n0 = 0;
+    while (m.N[I.PHASE] !== PHASE.END) {
+      stepMatch(m);
+      for (; n0 < m.log.length; n0++) {
+        const e = m.log[n0];
+        if (e[1] !== EV.RESTART) continue;
+        const sp = e[2], tk = e[3], rx = m.F[F_R], ry = m.F[F_R + 1], sx = rx > 0 ? 1 : -1;
+        cnt[sp]++;
+        assert.equal(m.team[tk], m.N[I.RTEAM], '蹴るのは再開するチームの選手');
+        assert.equal(m.N[I.OWN], tk, '蹴る選手がボールを持っている');
+        assert.ok(Math.abs(m.F[F_B] - rx) < 1e-6 && Math.abs(m.F[F_B + 1] - ry) < 1e-6, 'ボールは置かれた位置');
+        if (sp === SP.GKICK) assert.equal(tk % 11, 0, 'ゴールキックはGK');
+        for (let i = 0; i < NP; i++) {
+          if (m.team[i] === m.team[tk]) continue;
+          const d = Math.hypot(m.px[i] - rx, m.py[i] - ry);
+          if (sp === SP.THROW) assert.ok(d >= 2.1, `スローインで相手が近すぎる ${d.toFixed(2)}m seed ${seed} t ${e[0]}`);
+          if (sp === SP.CORNER) assert.ok(d >= 9.3, `コーナーで相手が近すぎる ${d.toFixed(2)}m seed ${seed} t ${e[0]}`);
+          if (sp === SP.GKICK) assert.ok(!(m.px[i] * sx > HL - PA_D && Math.abs(m.py[i]) < PA_HW), `ゴールキックで相手がエリア内 seed ${seed} t ${e[0]}`);
+        }
+      }
+    }
+  }
+  assert.ok(cnt[SP.THROW] > 0 && cnt[SP.GKICK] > 0 && cnt[SP.CORNER] > 0, `スロー${cnt[1]} GK${cnt[2]} CK${cnt[3]}`);
+  return `4試合: スローイン${cnt[1]} ゴールキック${cnt[2]} コーナー${cnt[3]}`;
 });
 
 // ── 決まりごとの検査 ──

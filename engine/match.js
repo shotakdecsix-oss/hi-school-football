@@ -4,14 +4,14 @@
 import {
   ENGINE_VERSION, DT, TICK_HZ, NP, HL, HW, BALL_R, PRED_N,
   F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_LEN,
-  I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, dirOf,
+  I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, SP, SP_WAIT, GOAL_WAIT, ST, ST_N, dirOf,
 } from './consts.js';
 import { FORMATIONS } from '../data/formations.js';
 import { normRules } from '../data/rules.js';
 import { hash4 } from './core/rng.js';
 import { AB, NAB, abVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
-import { think, movePlayers, carryBall, touches } from './brain.js';
+import { think, movePlayers, carryBall, touches, takeControl, takerReady, standSpot, keepOut } from './brain.js';
 import { decide } from './decide.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
@@ -91,13 +91,13 @@ function placeKickoff(m, kteam) {
   F[F_B] = F[F_B + 1] = F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = F[F_B + 6] = F[F_B + 7] = 0;
   F[F_B + 2] = BALL_R;
   N[I.LOCK] = 40; N[I.LOCKT] = kteam; N[I.PHASE] = PHASE.LIVE;
-  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE;
 }
 
 function pause(m, ticks, next, rteam) {
   const N = m.N;
   N[I.PHASE] = PHASE.PAUSE; N[I.TIMER] = ticks; N[I.NEXT] = next; N[I.RTEAM] = rteam;
-  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam; N[I.SETP] = SP.NONE;
 }
 
 function resume(m) {
@@ -108,6 +108,31 @@ function resume(m) {
   F[F_B + 2] = BALL_R;
   F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = 0;
   N[I.LOCK] = 30; N[I.LOCKT] = N[I.RTEAM]; N[I.PHASE] = PHASE.LIVE; N[I.KICKT] = m.t;
+  const sp = N[I.SETP];
+  if (sp > 0) { // 再開: 相手を規定の距離の外へ出し、蹴る選手がボールを持つ（蹴るまでボールは動かない）
+    const { px, py, vx, vy, team } = m, tk = N[I.TAKER], rx = F[F_R], ry = F[F_R + 1];
+    for (let i = 0; i < NP; i++) {
+      if (team[i] === team[tk]) continue;
+      const o = keepOut(sp, px[i], py[i], rx, ry);
+      if (o) { px[i] = o[0]; py[i] = o[1]; vx[i] = vy[i] = 0; }
+    }
+    if (!takerReady(m)) { const st = standSpot(sp, rx, ry); px[tk] = st[0]; py[tk] = st[1]; vx[tk] = vy[tk] = 0; }
+    m.log.push([m.t, EV.RESTART, sp, tk]);
+    takeControl(m, tk);
+  }
+}
+
+// 再開で蹴る選手: ゴールキックはGK、コーナーは蹴る能力（クロス・セットプレー）が高くて近い選手、スローインは一番近い選手
+function pickTaker(m, type, rteam, rx, ry) {
+  const { px, py, ab } = m, j0 = rteam * 11;
+  if (type === SP.GKICK) return j0;
+  let best = j0 + 1, bs = -1e9;
+  for (let s = 1; s < 11; s++) {
+    const i = j0 + s, dx = px[i] - rx, dy = py[i] - ry, d = Math.sqrt(dx * dx + dy * dy);
+    const sc = type === SP.CORNER ? ab[i * NAB + AB.CRS] + 0.5 * ab[i * NAB + AB.SET] - 0.08 * d : -d;
+    if (sc > bs) { bs = sc; best = i; }
+  }
+  return best;
 }
 
 // ボールがゴールラインやタッチラインを越えた
@@ -117,22 +142,24 @@ function onBallEvent(m, ev) {
     const k = dirOf(N, 0) === (ev === BALL_EV.GOAL_PX ? 1 : -1) ? 0 : 1; // その向きに攻めているチームの得点
     N[I.SCORE + k]++;
     m.log.push([m.t, EV.GOAL, k, N[I.LAST]]);
-    pause(m, 60, NEXT.KICKOFF, 1 - k);
+    pause(m, GOAL_WAIT, NEXT.KICKOFF, 1 - k);
     return;
   }
   const lk = N[I.LAST] >= 0 ? m.team[N[I.LAST]] : 0; // 最後に触ったチーム
-  let rteam, rx, ry;
+  let rteam, rx, ry, type;
   if (ev === BALL_EV.OUT_PX || ev === BALL_EV.OUT_NX) {
     const sx = ev === BALL_EV.OUT_PX ? 1 : -1;
     const def = dirOf(N, 0) === -sx ? 0 : 1; // そのゴールを守るチーム
-    if (lk === def) { rteam = 1 - def; rx = sx * (HL - 0.3); ry = F[F_B + 1] > 0 ? HW - 0.3 : -(HW - 0.3); } // コーナーキック
-    else { rteam = def; rx = sx * (HL - 5.5); ry = 0; } // ゴールキック
+    if (lk === def) { rteam = 1 - def; rx = sx * (HL - 0.3); ry = F[F_B + 1] > 0 ? HW - 0.3 : -(HW - 0.3); type = SP.CORNER; } // コーナーキック
+    else { rteam = def; rx = sx * (HL - 5.5); ry = 0; type = SP.GKICK; } // ゴールキック
   } else {
-    rteam = 1 - lk; rx = clamp(F[F_B], -HL + 1, HL - 1); ry = ev === BALL_EV.OUT_PY ? HW - 0.2 : -(HW - 0.2); // スローイン
+    rteam = 1 - lk; rx = clamp(F[F_B], -HL + 1, HL - 1); ry = ev === BALL_EV.OUT_PY ? HW - 0.2 : -(HW - 0.2); type = SP.THROW; // スローイン
   }
   m.log.push([m.t, EV.OUT, ev, rteam]);
   F[F_R] = rx; F[F_R + 1] = ry;
-  pause(m, 30, NEXT.RESTART, rteam);
+  pause(m, SP_WAIT[type], NEXT.RESTART, rteam);
+  N[I.SETP] = type; N[I.TAKER] = pickTaker(m, type, rteam, rx, ry);
+  N[I.ST + rteam * ST_N + (type === SP.THROW ? ST.THROW : type === SP.GKICK ? ST.GKICK : ST.CORNER)]++;
 }
 
 // 1 tick 進める。終了済みなら false。
@@ -153,7 +180,7 @@ export function stepMatch(m) {
     if (N[I.LOCK] > 0) N[I.LOCK]--;
     const o = N[I.OWN];
     if (o >= 0 && N[N_TMR + o] <= 0) decide(m, o); // 保持者が次の行動を決める
-  } else if (--N[I.TIMER] <= 0) resume(m);
+  } else if (--N[I.TIMER] <= 0 && (N[I.SETP] === SP.NONE || N[I.TIMER] <= -240 || takerReady(m))) resume(m); // 再開は、蹴る選手がボールの脇に着くまで待つ（最大12秒）
   m.t++;
   if (m.t === m.pEnd[N[I.HALF] - 1]) endPeriod(m);
   return true;

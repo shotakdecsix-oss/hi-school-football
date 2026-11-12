@@ -1,17 +1,17 @@
 // 保持者の判断と実行（4層AIの「判断」と「実行」）。
 // 選択肢（シュート・パス・スペースへのパス・ドリブル・クリア）に点数をつけ、一番高いものを選ぶ。
 // 点数 = ボールを持つ価値(xt)の期待値。乱数は「見え方（点数の誤差）」と「蹴りの誤差」にだけ使う。
-import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, dirOf } from './consts.js';
+import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP, dirOf } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { normal4 } from './core/rng.js';
 import { atan2, cos, sin, log, clamp } from './core/math.js';
-import { xt, xgAt, groundPass, lobPlan, timeToCover, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
 const PASS_COST = 0.010; // パスを出すこと自体の手間（テンポが切れる・動きが読まれる）。つなぐだけのパスを減らす
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
-const K_SHOOT = 1.3, K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
+const K_SHOOT = 1.0, K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
 // 運ぶ（ドリブル）の候補: ゴールへ向かう向きを前として、前・斜め前・横・斜め後ろの7方向 × 近く(4.5m)と遠く(9m)
 const CD = [[1, 0], [0.7071, 0.7071], [0.7071, -0.7071], [0, 1], [0, -1], [-0.7071, 0.7071], [-0.7071, -0.7071]];
 const CL = [4.5, 9];
@@ -102,7 +102,7 @@ export function carryOptions(m, i, press, hold, cb) {
   for (let li = hold ? -1 : 0; li < 2; li++) {
     for (let u = 0; u < (li < 0 ? 1 : 7); u++) {
       const L = li < 0 ? 0 : CL[li], ux = li < 0 ? 0 : CD[u][0], uy = li < 0 ? 0 : CD[u][1];
-      const dfx = clamp(fx + ux * L, -HL + 2, HL - 1.5), dfy = clamp(fy + uy * L, -HW + 1.5, HW - 1.5);
+      const dfx = clamp(fx + ux * L, -HL + 2, HL - 3), dfy = clamp(fy + uy * L, -HW + 1.5, HW - 1.5);
       const dx = dfx * dir, dy = dfy * dir, ex = dx - x, ey = dy - y, D2 = ex * ex + ey * ey;
       if (li >= 0 && D2 < 6.25) continue; // 2.5m も進めない（タッチライン際など）
       let keep = 1;
@@ -155,6 +155,7 @@ function kick(m, i, dx, dy, v0, vz, sigAng, sigSpd, tg) {
 export function decide(m, i) {
   const { px, py, vx, vy, team, slot, role, ab, vmax, acc, F, N, t, seed } = m;
   const k = team[i], dir = dirOf(N, k), A = i * NAB, gk = slot[i] === 0, j0 = k * 11, o0 = (1 - k) * 11;
+  const sp = N[I.SETP]; // 再開（スローイン・ゴールキック・コーナー）の最初のプレーか。蹴るだけで、運ぶ・撃つ・クリアはしない
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir;
   const press = pressureAt(m, x, y, k), line = offsideLine(m, k);
   const sig = 0.04 + 0.008 * (20 - (ab[A + AB.DEC] + ab[A + AB.VIS]) / 2); // 見え方の誤差（点数に対する割合）
@@ -180,11 +181,12 @@ export function decide(m, i) {
     }
     dx = clamp(dx, -HL + 1.5, HL - 1.5); dy = clamp(dy, -HW + 1.5, HW - 1.5);
     const ex = dx - x, ey = dy - y, D = Math.sqrt(ex * ex + ey * ey);
-    if (D < 3 || D > 55) return;
+    if (D < 3 || D > 55 || (sp === SP.THROW && D > 24)) return;
     const dfx = dx * dir, dfy = dy * dir, pd = pressureAt(m, dx, dy, k);
+    const air = sp === SP.CORNER && D > 8; // コーナーは浮き球でゴール前へ
     let p;
-    if (D <= 26) {
-      const g = groundPass(D);
+    if (D <= 26 && !air) {
+      const g = groundPass(D, rollRoom(dx, dy, ex / D, ey / D));
       if (g.v0 > 18 + 0.9 * lng) return; // 強く蹴れない距離
       p = laneSafe(m, k, x, y, dx, dy, g.v0);
       const rx = jx - dx, ry = jy - dy;
@@ -202,7 +204,7 @@ export function decide(m, i) {
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
     const V = K_PASS * (p * (xt(dfx, dfy) + KEEP) - (1 - p) * (LOSS_W * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
-    consider(V, D <= 26 ? 2 : 3, j, dx, dy);
+    consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
     if (j === i) continue;
@@ -211,11 +213,11 @@ export function decide(m, i) {
     if (slot[j] === 0 && fx > -22) continue; // GKへ戻すのは自陣深くだけ
     if (jx * dir > line + 0.3) continue; // すでにオフサイドの位置の味方には出さない
     evalPass(j, false);
-    if (ddx * dir > -3 && (role[j] >= ROLE.M || role[j] === ROLE.S)) evalPass(j, true);
+    if (sp !== SP.CORNER && ddx * dir > -3 && (role[j] >= ROLE.M || role[j] === ROLE.S)) evalPass(j, true);
   }
 
   // --- シュート ---
-  if (!gk) {
+  if (!gk && sp === SP.NONE) {
     const dgx = HL - fx;
     if (dgx > 0.3 && dgx < 32) {
       let block = 1;
@@ -232,13 +234,17 @@ export function decide(m, i) {
   }
 
   // --- ドリブル（運ぶ）---
-  if (!gk) carryOptions(m, i, press, false, (V, dx, dy, pace, dist) => consider(V, 4, -1, dx, dy, pace, dist));
+  if (!gk && sp === SP.NONE) carryOptions(m, i, press, false, (V, dx, dy, pace, dist) => consider(V, 4, -1, dx, dy, pace, dist));
 
   // --- クリア（自陣で強く寄せられているとき）---
-  if (!gk && fx < -28 && press > 0.4) consider(0.010 + 0.025 * press, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
+  if (!gk && sp === SP.NONE && fx < -28 && press > 0.4) {
+    consider(0.010 + 0.025 * press, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
+    consider(0.009 + 0.022 * press, 3, -1, x + dir * 12, y > 0 ? HW + 4 : -HW - 4); // 外（タッチライン）へ蹴り出す。相手ボールのスローインになる
+  }
   if (bt === 0) { bt = 3; bj = -1; bdx = clamp(x + dir * 40, -HL + 3, HL - 3); bdy = clamp(y * 0.3, -25, 25); } // 選択肢が無いとき
 
   // --- 実行 ---
+  N[I.SETP] = SP.NONE; // 再開のプレーはこれで終わり
   if (bt === 4) { // 運ぶ: 進む先と速さを決めて、半分ほど進んだらまた考える
     m.tx[i] = bdx; m.ty[i] = bdy; m.pc[i] = bpc;
     m.tmr[i] = clamp(Math.round(11 * bdist / (m.vmax[i] * bpc)), 8, 24);
@@ -265,7 +271,7 @@ export function decide(m, i) {
     return;
   }
   const dd = Math.sqrt((bdx - x) * (bdx - x) + (bdy - y) * (bdy - y));
-  if (bt === 2) kick(m, i, bdx, bdy, groundPass(dd).v0, 0, Math.max(0.02, 0.1 - 0.0045 * pas) * pe, 0.05, 30);
+  if (bt === 2) kick(m, i, bdx, bdy, groundPass(dd, rollRoom(bdx, bdy, (bdx - x) / dd, (bdy - y) / dd)).v0, 0, Math.max(0.02, 0.1 - 0.0045 * pas) * pe, 0.05, 30);
   else {
     const l = lobPlan(dd);
     N[I.ST + k * ST_N + (bj >= 0 ? ST.LOB : ST.CLR)]++;

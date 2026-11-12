@@ -1,5 +1,5 @@
 // 幾何と「価値」の関数（純粋関数）。fx, fy は攻める向きを +x に揃えた座標。
-import { HL, GOAL_HW, BALL_R } from './consts.js';
+import { HL, HW, GOAL_HW, BALL_R } from './consts.js';
 import { atan2, log } from './core/math.js';
 
 const c01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -31,8 +31,17 @@ export function xgAt(dx, dy) {
 // 地面のパス: 着く時の速さ vA を決めると、初速は vA + K・距離（転がり抵抗の分）。かかる時間は ln(v0/vA)/K。
 const arrive = (D) => (D < 4 ? 8.5 : D > 32 ? 13 : 8.5 + 0.15 * D);
 export function passV0(D) { return arrive(D) + K_ROLL * D; }
-export function groundPass(D) {
-  const vA = arrive(D), v0 = vA + K_ROLL * D;
+// 点 (x,y) から単位ベクトル (ux,uy) の向きに、ラインの0.5m内側までフィールド内を進める距離
+export function rollRoom(x, y, ux, uy) {
+  let s = 1e9, s2 = 1e9;
+  if (ux > 1e-6) s = (HL - 0.5 - x) / ux; else if (ux < -1e-6) s = (-HL + 0.5 - x) / ux;
+  if (uy > 1e-6) s2 = (HW - 0.5 - y) / uy; else if (uy < -1e-6) s2 = (-HW + 0.5 - y) / uy;
+  if (s2 < s) s = s2;
+  return s > 0 ? s : 0;
+}
+// room: 狙い点のさきでボールが転がれる距離。着く速さは「止まるまでにラインを割らない」強さ(K_ROLL×room)までに抑える（下限 2.5m/s）
+export function groundPass(D, room = 1e9) {
+  const vA = Math.min(arrive(D), Math.max(2.5, K_ROLL * room)), v0 = vA + K_ROLL * D;
   return { v0, vA, T: log(v0 / vA) / K_ROLL };
 }
 

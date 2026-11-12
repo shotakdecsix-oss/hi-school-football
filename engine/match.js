@@ -13,6 +13,7 @@ import { AB, NAB, abVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
 import { think, movePlayers, carryBall, touches, takeControl, takerReady, standSpot, keepOut } from './brain.js';
 import { decide } from './decide.js';
+import { pkOrder, startPK, stepPK } from './pk.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
@@ -71,6 +72,7 @@ export function createMatch(input) {
       for (let u = 0; u < 3; u++) { m.nb[i * 3 + u] = k * 11 + cs[u]; m.nw[i * 3 + u] = 1 / (1 + (ds[u] * ds[u]) / 196); }
     }
   }
+  m.pkOrder = pkOrder(m); // PK戦のキッカー順（入力から決まる値）
   N[I.LAST] = -1;
   N[I.HALF] = 1;
   placeKickoff(m, 0);
@@ -166,6 +168,7 @@ function onBallEvent(m, ev) {
 export function stepMatch(m) {
   const { F, N } = m, ph = N[I.PHASE];
   if (ph === PHASE.END) return false;
+  if (ph === PHASE.PK) { stepPK(m); m.t++; return true; }
   think(m);
   movePlayers(m);
   if (ph === PHASE.LIVE) {
@@ -205,10 +208,14 @@ function endPeriod(m) {
   else finish();
 }
 
-// PK戦（次の段階で作る。いまは同点のまま終わる）
-function startPK(m) {
-  const { N } = m;
-  N[I.PHASE] = PHASE.END; m.log.push([m.t, EV.FULL, N[I.SCORE], N[I.SCORE + 1]]);
+// 試合の勝者（0 / 1）。同点（PK戦もなし）や終わっていなければ -1。PK戦まで行った試合は、PKの得点で決まる。
+export function winner(m) {
+  const N = m.N;
+  if (N[I.PHASE] !== PHASE.END) return -1;
+  const a = N[I.SCORE], b = N[I.SCORE + 1];
+  if (a !== b) return a > b ? 0 : 1;
+  const pa = N[I.PKG], pb = N[I.PKG + 1];
+  return N[I.HALF] === 5 && pa !== pb ? (pa > pb ? 0 : 1) : -1;
 }
 
 // tick が until になるまで進める。stop = { [EV.GOAL]: true } のように渡すと、その出来事が起きた tick で止まり、
@@ -246,6 +253,7 @@ export function digestMatch(m) {
 // 表示用の役割。持ち場にいて、隣に合わせて持ち場から 2m 以上ずれている選手は 10（追従）として返す
 function roleView(m) {
   const a = Uint8Array.from(m.act);
+  if (m.N[I.PHASE] === PHASE.PK) return a;
   for (let i = 0; i < NP; i++) {
     if (a[i] === ACT.HOME && i % 11 !== 0) {
       const dx = m.tx[i] - m.hx[i], dy = m.ty[i] - m.hy[i];
@@ -261,6 +269,7 @@ export function frame(m) {
   return {
     t: m.t, xy, ball: new Float32Array([m.F[F_B], m.F[F_B + 1], m.F[F_B + 2]]),
     score: [m.N[I.SCORE], m.N[I.SCORE + 1]], phase: m.N[I.PHASE], half: m.N[I.HALF],
+    pk: [m.N[I.PKG], m.N[I.PKG + 1]], pkr: m.N[I.PKR], // PK戦の得点と、直近のキックの結果（-1=まだ 0=外れ 1=ゴール 2=セーブ）
     own: m.N[I.OWN], act: roleView(m),
   };
 }

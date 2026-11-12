@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 6;
+export const ENGINE_VERSION = 7;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -46,13 +46,22 @@ export const I = {
   KICKT: G + 20, // 直近にボールが蹴られた・弾かれた tick（守備側の反応の遅れの起点）
   GOT: G + 21, // 今の保持者がボールをコントロールした tick（持ち続けた時間の起点）
   SETP: G + 22, // 再開（セットプレー）の種類（SP）。0 = 通常のプレー中。ボールが蹴られるまで続く
-  TAKER: G + 23, // 再開を行う選手
-  ST: G + 24, // 統計: チームごとに ST_N 個
+  TAKER: G + 23, // 再開を行う選手（PK戦ではキッカー）
+  // PK戦（HALF=5）の状態
+  PKS: G + 24, // 手順: 0=位置につく 1=構える 2=ボールが飛んでいる 3=結果を見せる 4=助走
+  PKT: G + 25, // 手順ごとのタイマー（tick）
+  PKN: G + 26, // ここまでに蹴った本数（両チームの合計）
+  PKF: G + 27, // 先攻のチーム
+  PKG: G + 28, // 各チームのPKの得点（2つ）
+  PKD: G + 30, // GKが跳んだ向き（-1, 0, +1）
+  PKR: G + 31, // 直近のキックの結果（-1=まだ 0=外れ 1=ゴール 2=セーブ）
+  PKK: G + 32, // いま蹴るチーム（全員が同じゴール +x へ蹴る）
+  ST: G + 33, // 統計: チームごとに ST_N 個
 };
 export const ST_N = 15;
 export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11, THROW: 12, GKICK: 13, CORNER: 14 };
 export const N_LEN = I.ST + 2 * ST_N;
-export const PHASE = { LIVE: 0, PAUSE: 1, END: 2 };
+export const PHASE = { LIVE: 0, PAUSE: 1, END: 2, PK: 3 };
 export const NEXT = { KICKOFF: 0, RESTART: 1 };
 // 再開の種類。止まっている間（PAUSE）に、蹴る選手がボールの位置へ向かい、相手は離れる。待ち時間は種類ごと（tick）
 export const SP = { NONE: 0, THROW: 1, GKICK: 2, CORNER: 3 };
@@ -68,4 +77,4 @@ export const ACT = { HOME: 0, CARRY: 1, PRESS: 2, COVER: 3, MARK: 4, SUPPORT: 5,
 export const PRED_N = 15;
 
 // チームkが攻める向き（+1 = +x方向）。前半（と延長前半）はチーム0が+x、後半（と延長後半）は入れ替わる。
-export const dirOf = (N, k) => ((k === 0) === ((N[I.HALF] & 1) === 1) ? 1 : -1); // 区間ごとに攻める向きが入れ替わる
+export const dirOf = (N, k) => (N[I.HALF] === 5 ? (k === N[I.PKK] ? 1 : -1) : ((k === 0) === ((N[I.HALF] & 1) === 1) ? 1 : -1)); // 区間ごとに攻める向きが入れ替わる。PK戦は蹴る側が +x のゴールへ

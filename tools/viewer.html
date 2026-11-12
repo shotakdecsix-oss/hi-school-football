@@ -51,14 +51,14 @@ sv.innerHTML = pitchSvg() + '<g id="act"></g>';
 const act = $('act');
 $('legend').textContent = ROLE_LEGEND;
 
-let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '';
-const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦'], BREAK = ['', 'ハーフタイム', '延長へ', '延長ハーフタイム', 'PK戦へ'];
+let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '', ended = false;
+const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦'], BREAK = ['', 'ハーフタイム', '延長へ', '延長ハーフタイム', 'PK戦へ'], PKRES = ['外れ', 'ゴール！', 'セーブ！'];
 function start() {
   m = createMatch(sampleInput(+$('seed').value || 1, {
     home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value, rules: RULES[$('rl').value],
   }));
   prev = cur = frame(m);
-  acc = 0; holdUntil = 0; banner = '';
+  acc = 0; holdUntil = 0; banner = ''; ended = false;
 }
 $('go').onclick = start;
 $('pz').onclick = () => { paused = !paused; $('pz').textContent = paused ? '再開' : '一時停止'; };
@@ -77,16 +77,17 @@ function loop(now) {
     acc += dtReal * speed;
     let n = 0;
     while (acc >= DT && n < 1500) {
-      if (!stepMatch(m)) { acc = 0; banner = '試合終了'; break; }
+      if (!stepMatch(m)) { acc = 0; banner = '試合終了'; ended = true; break; }
       prev = cur; cur = frame(m); acc -= DT; n++;
-      if (cur.half !== prev.half) { banner = BREAK[prev.half]; holdUntil = now + 2500; acc = 0; break; }
+      if (cur.half !== prev.half) { banner = cur.half === 5 ? 'PK戦へ' : BREAK[prev.half]; holdUntil = now + 2500; acc = 0; break; }
+      if (cur.half === 5 && cur.pkr !== prev.pkr && cur.pkr >= 0) { banner = PKRES[cur.pkr]; holdUntil = now + 1500; acc = 0; break; } // PK戦: 1本ごとの結果を少し見せる
     }
     if (n >= 1500) acc = 0;
-    if (now >= holdUntil && banner && banner !== '試合終了') banner = '';
+    if (now >= holdUntil && banner && !ended) banner = '';
   }
   act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked);
   const sec = Math.floor(cur.t / TICK_HZ);
-  $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]} ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}${banner ? '　' + banner : ''}`;
+  $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]}${cur.half === 5 ? ` ${cur.pk[0]} - ${cur.pk[1]}` : ` ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`}${banner ? '　' + banner : ''}`;
   requestAnimationFrame(loop);
 }
 start();

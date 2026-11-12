@@ -5,7 +5,7 @@
 // --check: 各試合を2回走らせてチェック値が一致するか確かめる（再現性の確認）
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
-import { I, ST, ST_N, NP, HL, HW, PHASE, dirOf } from '../engine/consts.js';
+import { I, ST, ST_N, NP, HL, HW, PHASE, EV, dirOf } from '../engine/consts.js';
 import { RULES } from '../data/rules.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i < 0 ? d : process.argv[i + 1]; };
@@ -25,13 +25,14 @@ const mkInput = (seed) => {
 const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib', 'thr', 'gk', 'ck'];
 const tot = [0, 1].map(() => Object.fromEntries(KEYS.map((k) => [k, 0])));
 const mv = [0, 1].map(() => ({ n: 0, far8: 0, far12: 0, disp: 0, near15: 0, near3: 0, len: 0, wid: 0, ticks: 0, poss: 0 }));
-let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0;
+let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0, pkMatches = 0;
+const pkRes = [0, 0, 0]; // PK戦の1本ごとの結果（外れ・ゴール・セーブ）
 const t0 = performance.now();
 
 for (let s = 0; s < n; s++) {
   const input = mkInput(seed0 + s), m = createMatch(input);
   while (stepMatch(m)) {
-    if (m.t % SAMPLE_EVERY) continue;
+    if (m.t % SAMPLE_EVERY || m.N[I.PHASE] === PHASE.PK) continue;
     ticksAll++;
     if (m.N[I.PHASE] !== PHASE.LIVE) continue;
     ticksLive++;
@@ -64,6 +65,7 @@ for (let s = 0; s < n; s++) {
   allTicks += m.t * (check ? 2 : 1);
   const a = m.N[I.SCORE], b = m.N[I.SCORE + 1];
   if (a > b) w++; else if (a === b) d++; else l++;
+  if (m.N[I.HALF] === 5) { pkMatches++; for (const e of m.log) if (e[1] === EV.PKK) pkRes[e[4]]++; }
   for (let k = 0; k < 2; k++) {
     const B = I.ST + k * ST_N, t = tot[k];
     t.goals += m.N[I.SCORE + k]; t.shots += m.N[I.SHOTS + k];
@@ -93,5 +95,6 @@ for (let k = 0; k < 2; k++) {
   console.log(`  チーム${k}   ${f1(M.far8 / Math.max(1, M.ticks))}人 / ${f1(M.far12 / Math.max(1, M.ticks))}人 （外野9人中）   ${f1(M.disp / Math.max(1, M.n))}m   ${f1(M.near15 / Math.max(1, M.ticks))}人   ${f1(M.near3 / Math.max(1, M.ticks))}m   ${f1(M.len / Math.max(1, M.ticks))}m / ${f1(M.wid / Math.max(1, M.ticks))}m${per ? '' : ''}`);
 }
 console.log(`ボールが生きている時間 ${pc(ticksLive / Math.max(1, ticksAll))}（試合時間のうち、止まっている時間を除く）`);
+if (ko) { const nk = pkRes[0] + pkRes[1] + pkRes[2]; console.log(`PK戦まで行った試合 ${pkMatches}/${n}` + (nk ? `  1本ごと: ゴール ${pc(pkRes[1] / nk)} セーブ ${pc(pkRes[2] / nk)} 外れ ${pc(pkRes[0] / nk)}（${nk}本）` : '')); }
 console.log(`所要 ${sec.toFixed(1)} 秒（1試合 ${(sec / runs).toFixed(2)} 秒、${Math.round(allTicks / sec / 1000)}k tick/秒）${check ? `  再現性の不一致 ${bad} 件` : ''}`);
 process.exit(bad ? 1 : 0);

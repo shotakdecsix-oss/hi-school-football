@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
-import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch } from '../engine/match.js';
+import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner } from '../engine/match.js';
+import { startPK, pkDecided } from '../engine/pk.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
 import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP } from '../engine/consts.js';
@@ -255,6 +256,76 @@ await test('restart: 再開は正しいチームの選手がボールを持っ�
   }
   assert.ok(cnt[SP.THROW] > 0 && cnt[SP.GKICK] > 0 && cnt[SP.CORNER] > 0, `スロー${cnt[1]} GK${cnt[2]} CK${cnt[3]}`);
   return `4試合: スローイン${cnt[1]} ゴールキック${cnt[2]} コーナー${cnt[3]}`;
+});
+
+// ── PK戦 ──
+const PKR = { half: 1, et: 0, pk: true, ko: true, subs: 5, subTimes: 3 };
+await test('pk: 勝敗の決まり方（5本ずつの間の途中決着・サドンデス）', () => {
+  assert.equal(pkDecided(3, 3, 3, 0), 0); // 残り2本を決めても追いつけない
+  assert.equal(pkDecided(3, 3, 3, 1), -1);
+  assert.equal(pkDecided(4, 5, 3, 5), 1);
+  assert.equal(pkDecided(4, 5, 3, 4), -1); // 先攻にあと1本ある
+  assert.equal(pkDecided(5, 4, 4, 4), -1); // 後攻にあと1本ある
+  assert.equal(pkDecided(5, 5, 3, 3), -1); // サドンデスへ
+  assert.equal(pkDecided(5, 5, 4, 3), 0);
+  assert.equal(pkDecided(6, 5, 4, 3), -1); // サドンデスは同じ本数を蹴り終えてから
+  assert.equal(pkDecided(6, 6, 4, 3), 0);
+  assert.equal(pkDecided(6, 6, 3, 4), 1);
+});
+await test('pk: PK戦が規則どおりに進んで終わる（交互に蹴る・決着した本で終わる・勝者はPKの得点が多い側）', () => {
+  let total = 0;
+  for (let seed = 1; seed <= 16; seed++) {
+    const m = mkR(seed, PKR);
+    startPK(m); run(m);
+    assert.equal(m.N[I.PHASE], PHASE.END);
+    const ks = m.log.filter((e) => e[1] === EV.PKK), first = m.N[I.PKF], goals = [0, 0], cnt = [0, 0];
+    ks.forEach((e, n) => {
+      const team = e[2], kicker = e[3], res = e[4];
+      assert.equal(team, first ^ (n & 1), '交互に蹴る'); assert.equal(m.team[kicker], team, 'キッカーは蹴るチームの選手');
+      cnt[team]++; if (res === 1) goals[team]++;
+      const w = pkDecided(cnt[0], cnt[1], goals[0], goals[1]);
+      if (n < ks.length - 1) assert.equal(w, -1, `seed ${seed}: 決着したのに続けている`); else assert.ok(w >= 0, `seed ${seed}: 決着していないのに終わっている`);
+    });
+    assert.deepEqual(goals, [m.N[I.PKG], m.N[I.PKG + 1]]);
+    assert.equal(winner(m), goals[0] > goals[1] ? 0 : 1);
+    total += ks.length;
+  }
+  return `16回: 平均 ${(total / 16).toFixed(1)} 本`;
+});
+await test('pk: 1本ごとの結果が実際の水準（ゴール6〜8.5割・セーブ1〜3割・外れ2割未満）', () => {
+  const c = [0, 0, 0];
+  for (let seed = 1; seed <= 60; seed++) {
+    const m = mkR(seed, PKR);
+    startPK(m); run(m);
+    for (const e of m.log) if (e[1] === EV.PKK) c[e[4]]++;
+  }
+  const n = c[0] + c[1] + c[2], f = c.map((x) => x / n);
+  assert.ok(f[1] > 0.6 && f[1] < 0.85 && f[2] > 0.1 && f[2] < 0.3 && f[0] < 0.2, `外れ ${f[0].toFixed(2)} ゴール ${f[1].toFixed(2)} セーブ ${f[2].toFixed(2)}`);
+  return `${n}本: ゴール ${(100 * f[1]).toFixed(0)}% セーブ ${(100 * f[2]).toFixed(0)}% 外れ ${(100 * f[0]).toFixed(0)}%`;
+});
+await test('pk: PK戦の途中の保存・復元が一致', () => {
+  for (const seed of [3, 5, 8]) {
+    const m = mkR(seed, PKR), input = m.input;
+    startPK(m); run(m, m.t + 900); // 2本目あたり
+    assert.equal(m.N[I.PHASE], PHASE.PK);
+    const snap = snapshot(m);
+    run(m);
+    const D = digestMatch(m), fresh = createMatch(input);
+    restore(fresh, snap); run(fresh);
+    assert.equal(digestMatch(fresh), D, 'PK戦をまたぐ復元');
+  }
+});
+await test('pk: 延長でも同点ならPK戦で決着する（試合の流れの中で）', () => {
+  let n = 0;
+  for (let seed = 1; seed <= 8; seed++) {
+    const m = mkR(seed, { ...SHORT, pk: true });
+    run(m);
+    assert.equal(m.N[I.PHASE], PHASE.END);
+    assert.ok(winner(m) >= 0, '勝者が決まっている');
+    if (m.N[I.SCORE] === m.N[I.SCORE + 1]) { n++; assert.equal(m.N[I.HALF], 5); assert.equal(m.log.filter((e) => e[1] === EV.PK).length, 1); }
+  }
+  assert.ok(n >= 1, 'PK戦まで行った試合が無い');
+  return `8試合のうち PK戦 ${n}`;
 });
 
 // ── 決まりごとの検査 ──

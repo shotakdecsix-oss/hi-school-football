@@ -1,39 +1,56 @@
-// 試合エンジン本体（段階1: 土台）。画面に依存しない純粋なJS。Worker でも Node でも動く。
+// 試合エンジン本体。画面に依存しない純粋なJS。Worker でも Node でも動く。
 // 状態は2つの型付き配列（F=小数、N=整数）と出来事の記録（log）だけ。保存・復元・比較が簡単になる。
 // 時間は固定刻み（20Hz）の整数 tick。乱数は (試合の種, tick, 選手, 用途) から作るので、状態を持たない。
 import {
-  ENGINE_VERSION, DT, HALF_TICKS, FULL_TICKS, NP, HL, HW, BALL_R,
-  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_B, F_R, F_LEN, I, N_LEN, PHASE, NEXT, EV, dirOf,
+  ENGINE_VERSION, DT, HALF_TICKS, FULL_TICKS, NP, HL, HW, BALL_R, PRED_N,
+  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_LEN,
+  I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, dirOf,
 } from './consts.js';
 import { FORMATIONS } from '../data/formations.js';
+import { AB, NAB, abVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
-import { think, movePlayers, touches } from './brain.js';
+import { think, movePlayers, carryBall, touches } from './brain.js';
+import { decide } from './decide.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
 // input = { seed, teams: [ { formation, players: [ { id, ab } x11 ] } x2 ], changes: [] }
-// players の並びがスロット（0=GK）。ab は総合力の仮の値（1〜20）。changes は段階2で使う（交代・戦術変更）。
+// players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。
+// changes は後の段階で使う（交代・戦術変更）。
 export function createMatch(input) {
   const F = new Float64Array(F_LEN), N = new Int32Array(N_LEN);
+  const sub = (a, o) => a.subarray(o, o + NP);
   const m = {
     input, seed: input.seed | 0, t: 0, log: [], F, N,
-    px: F.subarray(F_PX, F_PX + NP), py: F.subarray(F_PY, F_PY + NP),
-    vx: F.subarray(F_VX, F_VX + NP), vy: F.subarray(F_VY, F_VY + NP),
-    tx: F.subarray(F_TX, F_TX + NP), ty: F.subarray(F_TY, F_TY + NP),
-    cd: N.subarray(0, NP),
-    team: new Uint8Array(NP), slot: new Uint8Array(NP),
+    px: sub(F, F_PX), py: sub(F, F_PY), vx: sub(F, F_VX), vy: sub(F, F_VY), tx: sub(F, F_TX), ty: sub(F, F_TY), pc: sub(F, F_PC),
+    cd: sub(N, N_CD), act: sub(N, N_ACT), tgt: sub(N, N_TGT), tmr: sub(N, N_TMR),
+    // 入力から決まる値（状態ではない）
+    team: new Uint8Array(NP), slot: new Uint8Array(NP), role: new Uint8Array(NP),
     fd: new Float64Array(NP), fl: new Float64Array(NP), // 持ち場（奥行・横）
-    spd: new Float64Array(NP), err: new Float64Array(NP), // 最高速度・キックの誤差
+    ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
+    cx0: new Float64Array(2), kick: new Uint8Array(2),
+    // 毎tick作り直す作業用（状態ではない）
+    hx: new Float64Array(NP), hy: new Float64Array(NP), icT: new Float64Array(NP), icX: new Float64Array(NP), icY: new Float64Array(NP),
+    bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1),
+    pa: new Uint8Array(NP), mpi: new Int16Array(128), mpo: new Int16Array(128), mpd: new Float64Array(128), usedO: new Uint8Array(NP),
   };
   for (let k = 0; k < 2; k++) {
     const T = input.teams[k], form = FORMATIONS[T.formation];
+    let sx = 0, deepest = -1;
     for (let s = 0; s < 11; s++) {
-      const i = k * 11 + s, ab = T.players[s].ab;
-      m.team[i] = k; m.slot[i] = s;
+      const i = k * 11 + s, v = abVec(T.players[s].ab);
+      m.team[i] = k; m.slot[i] = s; m.role[i] = form[s][2];
       m.fd[i] = form[s][0]; m.fl[i] = form[s][1];
-      m.spd[i] = 5.5 + 0.13 * ab;
-      m.err[i] = 0.3 - 0.01 * ab;
+      m.ab.set(v, i * NAB);
+      m.vmax[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
+      m.acc[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)
+      m.rgk[i] = s === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
+      if (s > 0) {
+        sx += -HL + form[s][0] * 2 * HL;
+        if (form[s][0] > deepest) { deepest = form[s][0]; m.kick[k] = s; } // キックオフで使う、最前線の選手
+      }
     }
+    m.cx0[k] = sx / 10; // 外野手の持ち場の平均（動的な陣形の基準）
   }
   N[I.LAST] = -1;
   N[I.HALF] = 1;
@@ -42,25 +59,26 @@ export function createMatch(input) {
 }
 
 function placeKickoff(m, kteam) {
-  const { F, N, px, py, vx, vy, tx, ty, team, fd, fl, cd } = m;
+  const { F, N, px, py, vx, vy, tx, ty, pc, team, fd, fl, cd, act, tgt, tmr } = m;
   for (let i = 0; i < NP; i++) {
     const dir = dirOf(N, team[i]), d = Math.min(fd[i], 0.47);
     px[i] = tx[i] = dir * (d * 2 * HL - HL);
     py[i] = ty[i] = fl[i] * HW * 0.9 * dir;
-    vx[i] = vy[i] = 0;
-    cd[i] = 0;
+    vx[i] = vy[i] = 0; cd[i] = 0; act[i] = ACT.HOME; tgt[i] = -1; tmr[i] = 0; pc[i] = 0.6;
   }
-  const f = kteam * 11 + 9, dk = dirOf(N, kteam); // キックオフ側のFWをボールの後ろに置く
+  const f = kteam * 11 + m.kick[kteam], dk = dirOf(N, kteam); // キックオフ側の最前線の選手をボールの後ろに置く
   px[f] = tx[f] = -dk * 0.5;
   py[f] = ty[f] = 0;
   F[F_B] = F[F_B + 1] = F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = F[F_B + 6] = F[F_B + 7] = 0;
   F[F_B + 2] = BALL_R;
   N[I.LOCK] = 40; N[I.LOCKT] = kteam; N[I.PHASE] = PHASE.LIVE;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t;
 }
 
 function pause(m, ticks, next, rteam) {
   const N = m.N;
   N[I.PHASE] = PHASE.PAUSE; N[I.TIMER] = ticks; N[I.NEXT] = next; N[I.RTEAM] = rteam;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam;
 }
 
 function resume(m) {
@@ -70,7 +88,7 @@ function resume(m) {
   F[F_B + 1] = F[F_B + 7] = F[F_R + 1];
   F[F_B + 2] = BALL_R;
   F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = 0;
-  N[I.LOCK] = 30; N[I.LOCKT] = N[I.RTEAM]; N[I.PHASE] = PHASE.LIVE;
+  N[I.LOCK] = 30; N[I.LOCKT] = N[I.RTEAM]; N[I.PHASE] = PHASE.LIVE; N[I.KICKT] = m.t;
 }
 
 // ボールがゴールラインやタッチラインを越えた
@@ -105,11 +123,17 @@ export function stepMatch(m) {
   think(m);
   movePlayers(m);
   if (ph === PHASE.LIVE) {
-    F[F_B + 6] = F[F_B]; F[F_B + 7] = F[F_B + 1];
-    const ev = stepBall(F, F_B, DT);
+    let ev;
+    if (N[I.OWN] >= 0) ev = carryBall(m);
+    else { F[F_B + 6] = F[F_B]; F[F_B + 7] = F[F_B + 1]; ev = stepBall(F, F_B, DT); }
     if (ev !== BALL_EV.NONE) onBallEvent(m, ev); else touches(m);
-    for (let i = 0; i < NP; i++) if (N[i] > 0) N[i]--;
+    for (let i = 0; i < NP; i++) {
+      if (N[N_CD + i] > 0) N[N_CD + i]--;
+      if (N[N_TMR + i] > 0) N[N_TMR + i]--;
+    }
     if (N[I.LOCK] > 0) N[I.LOCK]--;
+    const o = N[I.OWN];
+    if (o >= 0 && N[N_TMR + o] <= 0) decide(m, o); // 保持者が次の行動を決める
   } else if (--N[I.TIMER] <= 0) resume(m);
   m.t++;
   if (m.t === HALF_TICKS) {
@@ -153,12 +177,14 @@ export function digestMatch(m) {
 }
 
 // 描画用の画面1コマぶん。描画側はエンジンの内部を見ず、これだけを受け取る（Worker から転送もしやすい形）。
-// xy = 22人の x,y を交互に並べたもの（0〜10がチーム0、11〜21がチーム1）、ball = x,y,z（メートル）
+// xy = 22人の x,y を交互に並べたもの（0〜10がチーム0、11〜21がチーム1）、ball = x,y,z（メートル）、
+// own = ボールを持っている選手（いなければ -1）、act = 22人の今の役割（ACT）
 export function frame(m) {
   const xy = new Float32Array(2 * NP);
   for (let i = 0; i < NP; i++) { xy[2 * i] = m.px[i]; xy[2 * i + 1] = m.py[i]; }
   return {
     t: m.t, xy, ball: new Float32Array([m.F[F_B], m.F[F_B + 1], m.F[F_B + 2]]),
     score: [m.N[I.SCORE], m.N[I.SCORE + 1]], phase: m.N[I.PHASE], half: m.N[I.HALF],
+    own: m.N[I.OWN], act: Uint8Array.from(m.act),
   };
 }

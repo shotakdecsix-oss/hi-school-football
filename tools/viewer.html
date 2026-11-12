@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>試合ビューア（段階1・仮AI）</title>
+<title>試合ビューア（段階2）</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3; font: 14px system-ui, sans-serif; }
   #bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px; background: #161b22; }
@@ -21,6 +21,8 @@
   <button id="go">最初から</button>
   <button id="pz">一時停止</button>
   <span id="spd"></span>
+  <label><input id="roles" type="checkbox" checked> 役割の色</label>
+  <small id="legend" style="opacity:.7"></small>
   <span id="score"></span>
 </div>
 <svg id="sv" preserveAspectRatio="xMidYMid meet"></svg>
@@ -36,7 +38,7 @@ try {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame }] = mods;
+const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
@@ -45,6 +47,7 @@ const sv = $('sv');
 sv.setAttribute('viewBox', VIEWBOX);
 sv.innerHTML = pitchSvg() + '<g id="act"></g>';
 const act = $('act');
+$('legend').textContent = ROLE_LEGEND;
 
 let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now();
 function start() {
@@ -75,7 +78,7 @@ function loop(now) {
     }
     if (n >= 1500) acc = 0;
   }
-  act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)));
+  act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked);
   const sec = Math.floor(cur.t / TICK_HZ);
   $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
   requestAnimationFrame(loop);

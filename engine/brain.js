@@ -10,7 +10,7 @@ import { BALL_EV } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, timeToCover, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
-import { pressureAt, offsideLine, laneSafe, reactTicks } from './decide.js';
+import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard } from './decide.js';
 
 const REPLAN = 8, REACT = REACT_BASE; // REACT: 守備側がボールの動きを読んで反応し始めるまでの時間（秒）
 // 役割ごとに、ボールの位置に合わせて陣形がどれだけ前後するか（攻撃時／守備時）。順は G C S D M W A F
@@ -419,7 +419,7 @@ export function movePlayers(m) {
 
 // ボールを持っている間は、足元（進む向きに0.45m）に付いてくる。ライン越えの判定もここで行う。
 export function carryBall(m) {
-  const { F, N, px, py, vx, vy, tx, ty, team } = m, o = N[I.OWN];
+  const { F, N, px, py, vx, vy, tx, ty, team, ab, cd, t, seed } = m, o = N[I.OWN];
   let dx = tx[o] - px[o], dy = ty[o] - py[o], d = Math.sqrt(dx * dx + dy * dy);
   if (d < 0.5) { dx = dirOf(N, team[o]); dy = 0; d = 1; } // 止まっているときは相手ゴールの向き
   const gx = px[o] + (dx / d) * 0.45, gy = py[o] + (dy / d) * 0.45;
@@ -430,6 +430,16 @@ export function carryBall(m) {
   if (gx < -HL) return Math.abs(gy) < GOAL_HW ? BALL_EV.GOAL_NX : BALL_EV.OUT_NX;
   if (gy > HW) return BALL_EV.OUT_PY;
   if (gy < -HW) return BALL_EV.OUT_NY;
+  const sp = Math.sqrt(vx[o] * vx[o] + vy[o] * vy[o]); // 走りながら運ぶと、タッチミスでボールが足元から離れることがある
+  if (sp > 2.5) {
+    const k = team[o], A = o * NAB;
+    if (f4(seed, t, o, 67) < DT * touchHazard(sp, pressureAt(m, px[o], py[o], k), ab[A + AB.DRI], ab[A + AB.BAL])) {
+      const a = atan2(vy[o], vx[o]) + normal4(seed, t, o, 68) * 0.5, v = sp + 2.5 + f4(seed, t, o, 69);
+      F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 0;
+      N[I.OWN] = -1; N[I.LAST] = o; N[I.KICKT] = t; N[I.PASSK] = -1; N[I.RECV] = -1; cd[o] = 6;
+      N[I.ST + k * ST_N + ST.HEAVY]++;
+    }
+  }
   return BALL_EV.NONE;
 }
 
@@ -438,10 +448,13 @@ export function takeControl(m, p) {
   const { F, N, team, slot, px, py, vx, vy, tx, ty, pc, act, tgt, tmr } = m;
   const k = team[p], pk = N[I.PASSK];
   if (pk >= 0) N[I.ST + k * ST_N + (pk === k ? ST.PASSOK : ST.ICPT)]++; // パス成功か、相手に奪われたか
-  N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; N[I.LAST] = p; N[I.RECV] = -1; N[I.SHOTK] = -1;
+  N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; N[I.LAST] = p; N[I.RECV] = -1; N[I.SHOTK] = -1; N[I.GOT] = m.t;
   act[p] = ACT.CARRY; tgt[p] = -1;
-  tmr[p] = reactTicks(m, p, pressureAt(m, px[p], py[p], k)) + (slot[p] === 0 ? 30 : 0); // GKは持ってから少し間を取る
-  tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5;
+  const press = pressureAt(m, px[p], py[p], k);
+  const rt = reactTicks(m, p, press);
+  tmr[p] = slot[p] === 0 ? rt + 30 : Math.round(0.65 * rt); // GKは持ってから少し間を取る。外野手は受ける前に周りを見ているので、最初の判断が早い
+  if (slot[p] === 0) { tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5; }
+  else startCarry(m, p, press); // 止まらずに運び出す（相手から離れる・空いた方・今の勢い）
   F[F_B + 3] = vx[p]; F[F_B + 4] = vy[p]; F[F_B + 5] = 0;
 }
 

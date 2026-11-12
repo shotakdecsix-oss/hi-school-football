@@ -11,8 +11,21 @@ import { xt, xgAt, groundPass, lobPlan, timeToCover, K_ROLL, R_CTRL, REACT_BASE 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
 const PASS_COST = 0.010; // パスを出すこと自体の手間（テンポが切れる・動きが読まれる）。つなぐだけのパスを減らす
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
-const K_SHOOT = 1.5, K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
-const U5 = [[0.5, -0.866], [0.866, -0.5], [1, 0], [0.866, 0.5], [0.5, 0.866]]; // ドリブルの向き（ゴール方向に対して -60°〜+60°）
+const K_SHOOT = 1.3, K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
+// 運ぶ（ドリブル）の候補: ゴールへ向かう向きを前として、前・斜め前・横・斜め後ろの7方向 × 近く(4.5m)と遠く(9m)
+const CD = [[1, 0], [0.7071, 0.7071], [0.7071, -0.7071], [0, 1], [0, -1], [-0.7071, 0.7071], [-0.7071, -0.7071]];
+const CL = [4.5, 9];
+const RELIEF = 0.016; // 相手の圧力が減る場所へ運ぶ価値（圧力1あたり）
+const MOM = 0.005; // 今の走る向きを続ける価値（急に向きを変える・止まるのは時間を失う）
+const CARRY_COST = 0.002, CARRY_M = 0.0; // 運ぶ手間（ボールが足元から離れる。距離にも比例）
+const HOLD0 = 1.5, HOLD_W = 0.006; // 持ち続けて HOLD0 秒を過ぎると、1秒ごとに HOLD_W ずつ運ぶ価値が下がる（味方を探してパスする）
+
+// ドリブルのタッチミス（ボールが足元から離れて奪い合いになる）の起こりやすさ（1秒あたり）。
+// 速く走るほど・圧力が強いほど・ドリブルが下手なほど起こる。brain.js の carryBall が実際に起こし、判断（運ぶ価値）も同じ式で見積もる。
+export function touchHazard(sp, press, dri, bal) {
+  const r = sp * 0.125;
+  return (0.02 + 0.10 * r * r) * (1 + 0.8 * (press > 1 ? 1 : press)) * (1.3 - 0.025 * dri - 0.005 * bal);
+}
 
 // 点 (x,y) の周りの、相手チームの圧力（6m以内の相手の近さの合計。最大1.5）
 export function pressureAt(m, x, y, k) {
@@ -78,6 +91,56 @@ export function reactTicks(m, p, press) {
   return Math.round(clamp(8 + (18 + 0.8 * (20 - m.ab[p * NAB + AB.DEC])) * q * q, 6, 50));
 }
 
+// 保持者 i が運ぶ先の候補を全部採点して、cb(価値, 目標x, 目標y, 走る強さ, 距離) に渡す。
+// 価値 = 運んだ先のxt + 相手の圧力が減る分 + 今の勢いを続ける分 − 途中で奪われる危険。hold=true のときは「その場でボールを守る」も候補に入れる。
+export function carryOptions(m, i, press, hold, cb) {
+  const { px, py, vx, vy, team, ab, N } = m;
+  const k = team[i], dir = dirOf(N, k), A = i * NAB, o0 = (1 - k) * 11;
+  const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI];
+  const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
+  const held = (m.t - N[I.GOT]) * 0.05, tired = held > HOLD0 ? HOLD_W * (held - HOLD0) : 0; // 持ち続けた時間によるぶん
+  for (let li = hold ? -1 : 0; li < 2; li++) {
+    for (let u = 0; u < (li < 0 ? 1 : 7); u++) {
+      const L = li < 0 ? 0 : CL[li], ux = li < 0 ? 0 : CD[u][0], uy = li < 0 ? 0 : CD[u][1];
+      const dfx = clamp(fx + ux * L, -HL + 2, HL - 1.5), dfy = clamp(fy + uy * L, -HW + 1.5, HW - 1.5);
+      const dx = dfx * dir, dy = dfy * dir, ex = dx - x, ey = dy - y, D2 = ex * ex + ey * ey;
+      if (li >= 0 && D2 < 6.25) continue; // 2.5m も進めない（タッチライン際など）
+      let keep = 1;
+      for (let q = o0; q < o0 + 11; q++) { // 進路の近くにいる相手（動きを0.3秒先まで見込む）
+        const qx = px[q] + vx[q] * 0.3, qy = py[q] + vy[q] * 0.3;
+        let s = D2 > 1e-6 ? ((qx - x) * ex + (qy - y) * ey) / D2 : 0;
+        s = s < 0 ? 0 : s > 1 ? 1 : s;
+        const cx = x + ex * s - qx, cy = y + ey * s - qy, d = Math.sqrt(cx * cx + cy * cy);
+        if (d < 4.5) keep *= 1 - clamp(0.55 * (1 - d / 4.5) + 0.03 * (ab[q * NAB + AB.TCK] - dri), 0, 0.75);
+      }
+      const pd = pressureAt(m, dx, dy, k), dist = Math.sqrt(D2);
+      keep *= 1 - 0.08 * (pd > 1 ? 1 : pd);
+      const pace = clamp(0.4 + 0.012 * dri + 0.22 * (ux > 0 ? ux : 0) * (1 - 0.4 * pr), 0.4, 0.9);
+      if (dist > 0.1) { // 走る間のタッチミスで、半分ほどは奪われる
+        const vc = m.vmax[i] * pace;
+        keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
+      }
+      const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
+      const V = K_DRIB * (keep * (xt(dfx, dfy) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      cb(V, dx, dy, pace, dist);
+    }
+  }
+}
+
+// ボールを受けた直後: 止まらずに運び出す（相手から離れる・空いた方・今の勢いの向き）。その場で守るほうが良ければ止まる。
+export function startCarry(m, p, press) {
+  const { px, py, vx, vy, tx, ty, pc, ab, seed, t } = m, A = p * NAB;
+  const sig = 0.04 + 0.008 * (20 - (ab[A + AB.DEC] + ab[A + AB.VIS]) / 2);
+  let bw = -1e9, n = 0;
+  tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5;
+  carryOptions(m, p, press, true, (V, dx, dy, pace, dist) => {
+    const w = V * (1 + sig * normal4(seed, t, p, 300 + n)) + 0.002 * normal4(seed, t, p, 340 + n);
+    n++;
+    if (w > bw && dist >= 0.1) { bw = w; tx[p] = dx; ty[p] = dy; pc[p] = pace; }
+    else if (w > bw) { bw = w; tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5; }
+  });
+}
+
 // 蹴る。向きと強さに誤差が乗る。dx,dy=狙い点、v0=水平方向の初速、vz=上向きの初速
 function kick(m, i, dx, dy, v0, vz, sigAng, sigSpd, tg) {
   const { F, N, t, seed } = m, bx = F[F_B], by = F[F_B + 1];
@@ -99,11 +162,11 @@ export function decide(m, i) {
   const pas = ab[A + AB.PAS], lng = gk ? ab[A + AB.GKD] : ab[A + AB.LNG];
   const pe = 1 + 0.5 * press * (1 - 0.03 * ab[A + AB.CMP]); // 圧力による蹴りの乱れ
 
-  let bV = -1e9, bt = 0, bj = -1, bdx = 0, bdy = 0, tag = 0;
-  const consider = (V, type, j, dx, dy) => {
+  let bV = -1e9, bt = 0, bj = -1, bdx = 0, bdy = 0, bpc = 0.5, bdist = 0, tag = 0;
+  const consider = (V, type, j, dx, dy, pace, dist) => {
     const w = V * (1 + sig * normal4(seed, t, i, 100 + tag)) + 0.002 * normal4(seed, t, i, 200 + tag);
     tag++;
-    if (w > bV) { bV = w; bt = type; bj = j; bdx = dx; bdy = dy; }
+    if (w > bV) { bV = w; bt = type; bj = j; bdx = dx; bdy = dy; bpc = pace; bdist = dist; }
   };
 
   // --- パス（足元・スペース）---
@@ -168,29 +231,17 @@ export function decide(m, i) {
     }
   }
 
-  // --- ドリブル ---
-  if (!gk) {
-    for (let u = 0; u < 5; u++) {
-      const dfx = clamp(fx + U5[u][0] * 7, -HL + 2, HL - 1.5), dfy = clamp(fy + U5[u][1] * 7, -HW + 1.5, HW - 1.5);
-      const dx = dfx * dir, dy = dfy * dir, ex = dx - x, ey = dy - y, D2 = ex * ex + ey * ey;
-      let keep = 1;
-      for (let q = o0; q < o0 + 11; q++) {
-        let s = D2 > 1e-6 ? ((px[q] - x) * ex + (py[q] - y) * ey) / D2 : 0;
-        s = clamp(s, 0, 1);
-        const cx = x + ex * s - px[q], cy = y + ey * s - py[q], d = Math.sqrt(cx * cx + cy * cy);
-        if (d < 4.5) keep *= 1 - clamp(0.55 * (1 - d / 4.5) + 0.03 * (ab[q * NAB + AB.TCK] - ab[A + AB.DRI]), 0, 0.75);
-      }
-      consider(K_DRIB * (keep * (xt(dfx, dfy) + KEEP) - (1 - keep) * (LOSS_W * xt(-fx, fy) + KEEP)) - 0.002, 4, -1, dx, dy);
-    }
-  }
+  // --- ドリブル（運ぶ）---
+  if (!gk) carryOptions(m, i, press, false, (V, dx, dy, pace, dist) => consider(V, 4, -1, dx, dy, pace, dist));
 
   // --- クリア（自陣で強く寄せられているとき）---
   if (!gk && fx < -28 && press > 0.4) consider(0.010 + 0.025 * press, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
   if (bt === 0) { bt = 3; bj = -1; bdx = clamp(x + dir * 40, -HL + 3, HL - 3); bdy = clamp(y * 0.3, -25, 25); } // 選択肢が無いとき
 
   // --- 実行 ---
-  if (bt === 4) { // ドリブル: 進む先を決めて、少ししたらまた考える
-    m.tx[i] = bdx; m.ty[i] = bdy; m.pc[i] = 0.5 + 0.012 * ab[A + AB.DRI]; m.tmr[i] = 12;
+  if (bt === 4) { // 運ぶ: 進む先と速さを決めて、半分ほど進んだらまた考える
+    m.tx[i] = bdx; m.ty[i] = bdy; m.pc[i] = bpc;
+    m.tmr[i] = clamp(Math.round(11 * bdist / (m.vmax[i] * bpc)), 8, 24);
     N[I.ST + k * ST_N + ST.DRIB]++;
     return;
   }
@@ -203,7 +254,7 @@ export function decide(m, i) {
     const v0 = clamp(16 + sht, 18, 32), te = D / (v0 * 0.9);
     let vz = clamp((0.9 + 4.9 * te * te - BALL_R) / te, 0.5, 9) + normal4(seed, t, i, 34) * 1.1;
     if (vz < 0) vz = 0;
-    kick(m, i, ax, ay, v0, vz, Math.max(0.025, 0.22 - 0.008 * sht) * (1 + 0.35 * press) * clamp(D / 18, 0.6, 1.4), 0.06, 36);
+    kick(m, i, ax, ay, v0, vz, Math.max(0.03, 0.30 - 0.012 * sht) * (1 + 0.35 * press) * clamp(D / 18, 0.6, 1.4), 0.06, 36);
     N[I.SHOTS + k]++; N[I.SHOTK] = k; N[I.SHOTT] = t;
     m.log.push([t, EV.SHOT, k, i]);
     const vxb = F[F_B + 3], vyb = F[F_B + 4]; // 枠内かどうか（直進で見積もる。統計用）

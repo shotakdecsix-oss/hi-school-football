@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 3;
+export const ENGINE_VERSION = 4;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -43,10 +43,11 @@ export const I = {
   SHOTT: G + 16, SHOTK: G + 17, // 直近のシュートの tick と、撃ったチーム（なければ -1）
   PLANK: G + 18, // チームごとの役割割り当ての鍵（2つ）
   KICKT: G + 20, // 直近にボールが蹴られた・弾かれた tick（守備側の反応の遅れの起点）
-  ST: G + 21, // 統計: チームごとに ST_N 個
+  GOT: G + 21, // 今の保持者がボールをコントロールした tick（持ち続けた時間の起点）
+  ST: G + 22, // 統計: チームごとに ST_N 個
 };
 export const ST_N = 12;
-export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10 };
+export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11 };
 export const N_LEN = I.ST + 2 * ST_N;
 export const PHASE = { LIVE: 0, PAUSE: 1, END: 2 };
 export const NEXT = { KICKOFF: 0, RESTART: 1 };

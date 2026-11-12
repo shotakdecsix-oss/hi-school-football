@@ -11,6 +11,11 @@ export const GOLDEN_SPEC = {
   ticks: [1200, 12000, Infinity],
   opts: { home: '4-4-2', away: '4-3-3', abilHome: 11, abilAway: 9 },
   short: { half: 2, et: 1, pk: true, ko: true, subs: 5, subTimes: 3 }, // 4分+延長2分（同点が多く、延長・PK戦まで通る）
+  changes: [
+    { t: 600, k: 0, type: 'sub', slot: 9, bench: 2 }, { t: 900, k: 1, type: 'sub', slot: 6, bench: 5 }, // 30秒・45秒のあとの最初の中断
+    { t: 2400, k: 0, type: 'sub', slot: 0, bench: 0 }, { t: 2400, k: 1, type: 'sub', slot: 3, bench: 1 }, // ハーフタイム（2分）
+    { t: 5000, k: 0, type: 'sub', slot: 10, bench: 7 }, // 延長前半（短縮規則では 2分+2分+1分）
+  ],
 };
 
 export async function computeGolden(spec = GOLDEN_SPEC, onStep = async () => {}) {
@@ -26,6 +31,10 @@ export async function computeGolden(spec = GOLDEN_SPEC, onStep = async () => {})
     const ms = createMatch(sampleInput(seed, { ...spec.opts, rules: spec.short }));
     run(ms);
     row.push(digestMatch(ms));
+    await onStep(seed, 0);
+    const mc = createMatch(sampleInput(seed, { ...spec.opts, rules: spec.short, changes: spec.changes })); // 交代あり（ハーフタイム・中断・GK交代）
+    run(mc);
+    row.push(digestMatch(mc));
     await onStep(seed, 0);
     out.cases[seed] = row;
   }

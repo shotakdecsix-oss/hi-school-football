@@ -59,6 +59,7 @@ export function startPK(m) {
   const { N, px, py, vx, vy } = m;
   N[I.PHASE] = PHASE.PK; N[I.HALF] = 5;
   m.log.push([m.t, EV.PK, N[I.SCORE], N[I.SCORE + 1]]);
+  m.pkOrder = pkOrder(m); // 交代のあとの出場者で決める
   N[I.PKF] = hash4(m.seed, 0, 0, 801) & 1; // 先攻（コイントス）
   N[I.PKN] = 0; N[I.PKG] = 0; N[I.PKG + 1] = 0;
   beginKick(m);

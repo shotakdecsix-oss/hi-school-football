@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 7;
+export const ENGINE_VERSION = 8;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -56,7 +56,15 @@ export const I = {
   PKD: G + 30, // GKが跳んだ向き（-1, 0, +1）
   PKR: G + 31, // 直近のキックの結果（-1=まだ 0=外れ 1=ゴール 2=セーブ）
   PKK: G + 32, // いま蹴るチーム（全員が同じゴール +x へ蹴る）
-  ST: G + 33, // 統計: チームごとに ST_N 個
+  // 選手交代
+  PAUSET: G + 33, // いまの中断（PAUSE）が始まった tick。交代の「機会」を見分けるのに使う
+  SUBI: G + 34, // 次に処理する交代（m.changes の何番目か）
+  SUBN: G + 35, // 各チームの交代人数（2つ）
+  SUBO: G + 37, // 各チームの交代の機会の回数（2つ。ハーフタイム・延長前の交代は数えない）
+  SUBT: G + 39, // 各チームが最後に交代した中断の PAUSET（2つ。-1 = まだ）
+  BUSED: G + 41, // 各チームの、出場済みの控えの印（ビット。2つ）
+  OCC: G + 43, // 22人それぞれの、いまの出場者（-1 = 先発、0以上 = 控えの番号）
+  ST: G + 65, // 統計: チームごとに ST_N 個
 };
 export const ST_N = 15;
 export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11, THROW: 12, GKICK: 13, CORNER: 14 };

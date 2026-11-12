@@ -17,9 +17,11 @@ import { pkOrder, startPK, stepPK } from './pk.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
-// input = { seed, teams: [ { formation, players: [ { id, ab } x11 ] } x2 ], changes: [], rules }
-// players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。
-// rules は大会ごとの規定（data/rules.js。省略 = リーグ戦の90分）。changes は後の段階で使う（交代・戦術変更）。
+// input = { seed, teams: [ { formation, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
+// players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。bench は控え（省略可）。
+// rules は大会ごとの規定（data/rules.js。省略 = リーグ戦の90分）。
+// changes = [ { t, k, type: 'sub', slot, bench } ... ]: t(tick)以降の最初の中断（ボールが出た・ゴールのあと）かハーフタイムで、
+// チームkのスロット slot の選手を bench 番目の控えに替える。規定の人数・回数を超える交代、出場済みの控えは実行されない（記録の最後が 0）。
 export function createMatch(input) {
   const F = new Float64Array(F_LEN), N = new Int32Array(N_LEN);
   const sub = (a, o) => a.subarray(o, o + NP);
@@ -34,6 +36,7 @@ export function createMatch(input) {
     fd: new Float64Array(NP), fl: new Float64Array(NP), // 持ち場（奥行・横）
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
     cx0: new Float64Array(2), kick: new Uint8Array(2),
+    changes: (input.changes || []).filter((c) => c.type === 'sub').map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]), // 交代（t の順。入力から決まる値）
     nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
     ord: new Int16Array(NP), done: new Uint8Array(NP), // 追従の計算用（作業用）
     // 毎tick作り直す作業用（状態ではない）
@@ -45,13 +48,10 @@ export function createMatch(input) {
     const T = input.teams[k], form = FORMATIONS[T.formation];
     let sx = 0, deepest = -1;
     for (let s = 0; s < 11; s++) {
-      const i = k * 11 + s, v = abVec(T.players[s].ab);
+      const i = k * 11 + s;
       m.team[i] = k; m.slot[i] = s; m.role[i] = form[s][2];
       m.fd[i] = form[s][0]; m.fl[i] = form[s][1];
-      m.ab.set(v, i * NAB);
-      m.vmax[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
-      m.acc[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)
-      m.rgk[i] = s === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
+      setPlayerAb(m, i, T.players[s].ab);
       if (s > 0) {
         sx += -HL + form[s][0] * 2 * HL;
         if (form[s][0] > deepest) { deepest = form[s][0]; m.kick[k] = s; } // キックオフで使う、最前線の選手
@@ -72,11 +72,53 @@ export function createMatch(input) {
       for (let u = 0; u < 3; u++) { m.nb[i * 3 + u] = k * 11 + cs[u]; m.nw[i * 3 + u] = 1 / (1 + (ds[u] * ds[u]) / 196); }
     }
   }
-  m.pkOrder = pkOrder(m); // PK戦のキッカー順（入力から決まる値）
+  m.pkOrder = pkOrder(m); // PK戦のキッカー順（出場者の能力から決まる値）
+  N[I.SUBT] = N[I.SUBT + 1] = -1; N[I.PAUSET] = -1;
+  for (let i = 0; i < NP; i++) N[I.OCC + i] = -1; // 全員が先発
   N[I.LAST] = -1;
   N[I.HALF] = 1;
   placeKickoff(m, 0);
   return m;
+}
+
+// 選手 i（チーム内の位置は固定）に、能力 ab の選手を入れる（入力から決まる値を作り直す）
+function setPlayerAb(m, i, ab) {
+  const v = abVec(ab);
+  m.ab.set(v, i * NAB);
+  m.vmax[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
+  m.acc[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)
+  m.rgk[i] = m.slot[i] === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
+}
+
+// 状態 N の出場者（OCC）に合わせて、能力などの入力から決まる値を作り直す（復元のあとに必要）
+function refreshOccupants(m) {
+  const T = m.input.teams;
+  for (let i = 0; i < NP; i++) {
+    const occ = m.N[I.OCC + i], k = m.team[i], s = m.slot[i];
+    setPlayerAb(m, i, occ < 0 ? T[k].players[s].ab : T[k].bench[occ].ab);
+  }
+  m.pkOrder = pkOrder(m);
+}
+
+// 中断（ボールが出た・ゴールのあと）かハーフタイム（brk）に、時刻が来ている交代を実行する。
+// 人数は規定の subs 人まで、機会は subTimes 回まで（中断ごとに1回と数える。ハーフタイム・延長前は数えない）。延長ではそれぞれ +1。
+function applySubs(m, brk) {
+  const { N, changes, rules } = m, inEt = N[I.HALF] >= 3;
+  while (N[I.SUBI] < changes.length && changes[N[I.SUBI]].t <= m.t) {
+    const ch = changes[N[I.SUBI]++], k = ch.k, s = ch.slot, b = ch.bench, bench = (m.input.teams[k] || {}).bench;
+    let ok = 0;
+    if ((k === 0 || k === 1) && bench && b >= 0 && b < bench.length && s >= 0 && s < 11 && !((N[I.BUSED + k] >> b) & 1)) {
+      const newOcc = !brk && N[I.SUBT + k] !== N[I.PAUSET];
+      if (N[I.SUBN + k] < rules.subs + (inEt ? 1 : 0) && (!newOcc || N[I.SUBO + k] < rules.subTimes + (inEt ? 1 : 0))) {
+        ok = 1;
+        N[I.SUBN + k]++;
+        if (newOcc) { N[I.SUBO + k]++; N[I.SUBT + k] = N[I.PAUSET]; }
+        N[I.BUSED + k] |= 1 << b; N[I.OCC + k * 11 + s] = b;
+        setPlayerAb(m, k * 11 + s, bench[b].ab);
+      }
+    }
+    m.log.push([m.t, EV.SUB, k, s, b, ok]);
+  }
 }
 
 function placeKickoff(m, kteam) {
@@ -100,6 +142,8 @@ function pause(m, ticks, next, rteam) {
   const N = m.N;
   N[I.PHASE] = PHASE.PAUSE; N[I.TIMER] = ticks; N[I.NEXT] = next; N[I.RTEAM] = rteam;
   N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam; N[I.SETP] = SP.NONE;
+  N[I.PAUSET] = m.t;
+  applySubs(m, false);
 }
 
 function resume(m) {
@@ -198,12 +242,12 @@ function endPeriod(m) {
   const { N, rules } = m, p = N[I.HALF], s0 = N[I.SCORE], s1 = N[I.SCORE + 1], level = s0 === s1;
   const go = (half, kteam) => { N[I.HALF] = half; placeKickoff(m, kteam); };
   const finish = () => { N[I.PHASE] = PHASE.END; m.log.push([m.t, EV.FULL, s0, s1]); };
-  if (p === 1) { m.log.push([m.t, EV.HALF, s0, s1]); go(2, 1); }
+  if (p === 1) { m.log.push([m.t, EV.HALF, s0, s1]); applySubs(m, true); go(2, 1); }
   else if (p === 2) {
-    if (rules.ko && level && rules.et > 0) { m.log.push([m.t, EV.ET, s0, s1]); go(3, tossTeam(m)); }
+    if (rules.ko && level && rules.et > 0) { m.log.push([m.t, EV.ET, s0, s1]); applySubs(m, true); go(3, tossTeam(m)); }
     else if (rules.ko && level && rules.pk) startPK(m);
     else finish();
-  } else if (p === 3) { m.log.push([m.t, EV.HALF, s0, s1]); go(4, 1 - tossTeam(m)); }
+  } else if (p === 3) { m.log.push([m.t, EV.HALF, s0, s1]); applySubs(m, true); go(4, 1 - tossTeam(m)); }
   else if (level && rules.pk) startPK(m);
   else finish();
 }
@@ -235,6 +279,7 @@ export function snapshot(m) {
 }
 export function restore(m, s) {
   m.t = s.t; m.F.set(s.F); m.N.set(s.N); m.log = s.log.map((e) => e.slice());
+  refreshOccupants(m); // 交代があったあとの能力などを作り直す
 }
 export function snapshotToJSON(s) {
   return { t: s.t, F: Array.from(s.F), N: Array.from(s.N), log: s.log };

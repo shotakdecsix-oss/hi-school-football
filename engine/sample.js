@@ -17,19 +17,25 @@ const PROFILE = {
 };
 const KEYS = Object.keys(AB); // 定義順 = 番号順
 
+// 控え8人（GK1・守備2・中盤3・攻撃2）。先発より少しだけ能力が低い
+const BENCH_ROLES = [R.G, R.D, R.C, R.M, R.W, R.A, R.F, R.S];
+
+// changes は交代の指示 [{ t, k, type: 'sub', slot, bench }]（engine/match.js の入力を見る）
 export function sampleInput(seed, o = {}) {
-  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10, rules } = o; // rules は data/rules.js の値（省略 = リーグ戦）
+  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10, rules, changes = [] } = o; // rules は data/rules.js の値（省略 = リーグ戦）
+  const player = (k, s, role, base, id) => {
+    const prof = PROFILE[role];
+    const ab = KEYS.map((name, a) => {
+      let v = base + (prof[name] || 0) + (hash4(seed, 900 + k, s * 40 + a, 1) / 4294967296 - 0.5) * 3;
+      if (role !== R.G && a >= AB.GKR) v = base - 8; // 外野手のGK能力は使わない
+      return Math.min(20, Math.max(1, v));
+    });
+    return { id, ab };
+  };
   const team = (k, formation, base) => ({
     formation,
-    players: FORMATIONS[formation].map((def, s) => {
-      const role = def[2], prof = PROFILE[role];
-      const ab = KEYS.map((name, a) => {
-        let v = base + (prof[name] || 0) + (hash4(seed, 900 + k, s * 40 + a, 1) / 4294967296 - 0.5) * 3;
-        if (role !== R.G && a >= AB.GKR) v = base - 8; // 外野手のGK能力は使わない
-        return Math.min(20, Math.max(1, v));
-      });
-      return { id: 'T' + k + 'P' + s, ab };
-    }),
+    players: FORMATIONS[formation].map((def, s) => player(k, s, def[2], base, 'T' + k + 'P' + s)),
+    bench: BENCH_ROLES.map((role, b) => player(k, 11 + b, role, base - 1, 'T' + k + 'B' + b)),
   });
-  return { seed, teams: [team(0, home, abilHome), team(1, away, abilAway)], changes: [], rules };
+  return { seed, teams: [team(0, home, abilHome), team(1, away, abilAway)], changes, rules };
 }

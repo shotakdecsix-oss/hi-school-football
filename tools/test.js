@@ -7,6 +7,7 @@ import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
 import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner } from '../engine/match.js';
 import { startPK, pkDecided } from '../engine/pk.js';
+import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
 import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP } from '../engine/consts.js';
@@ -326,6 +327,58 @@ await test('pk: 延長でも同点ならPK戦で決着する（試合の流れ�
   }
   assert.ok(n >= 1, 'PK戦まで行った試合が無い');
   return `8試合のうち PK戦 ${n}`;
+});
+
+// ── 選手交代 ──
+const SUBR = { half: 8, et: 0, pk: false, ko: false, subs: 5, subTimes: 3 }; // 8分ずつ（テスト用）
+const MIN = 1200; // 1分 = 1200 tick
+const mkS = (seed, changes, rules = SUBR) => createMatch(sampleInput(seed, { ...OPT, rules, changes }));
+const sub = (t, k, slot, bench) => ({ t, k, type: 'sub', slot, bench });
+const subLog = (m) => m.log.filter((e) => e[1] === EV.SUB);
+const abvec = (input, k, b) => Array.from(abVec(input.teams[k].bench[b].ab)); // 控え b の能力
+await test('sub: 時刻のあとの最初の中断で交代し、控えの能力に入れ替わる', () => {
+  const m = mkS(4, [sub(3 * MIN, 0, 9, 2)]), input = m.input;
+  const before = Array.from(m.ab.subarray(9 * NAB, 10 * NAB));
+  run(m, 3 * MIN - 1);
+  assert.equal(subLog(m).length, 0, '時刻の前には交代しない');
+  run(m, 6 * MIN);
+  const L = subLog(m);
+  assert.equal(L.length, 1);
+  assert.ok(L[0][0] >= 3 * MIN && L[0][0] < 6 * MIN, '数分のうちの中断で行われる');
+  assert.deepEqual(L[0].slice(2), [0, 9, 2, 1]);
+  const bench = Array.from(abVec(input.teams[0].bench[2].ab));
+  assert.deepEqual(Array.from(m.ab.subarray(9 * NAB, 10 * NAB)), bench);
+  assert.notDeepEqual(before, bench);
+  assert.equal(m.vmax[9], 5.8 + 0.22 * bench[AB.SPD]);
+});
+await test('sub: 人数（5人）・機会（3回）・同じ控えの再出場に上限があり、超えた交代は実行されない（記録の最後が0）', () => {
+  const ok = (m) => { run(m); return subLog(m).map((e) => e[5]); };
+  assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 1, 0), sub(3 * MIN, 0, 2, 1), sub(5 * MIN, 0, 3, 2), sub(7 * MIN, 0, 4, 3)])), [1, 1, 1, 0], '機会は3回まで');
+  assert.deepEqual(ok(mkS(5, [1, 2, 3, 4, 5, 6].map((s, n) => sub(2 * MIN, 1, s, n)))), [1, 1, 1, 1, 1, 0], '人数は5人まで（同じ機会に6人）');
+  assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 1, 0), sub(3 * MIN, 0, 2, 0)])), [1, 0], '同じ控えは1度だけ');
+  assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 11, 0), sub(1 * MIN, 0, 1, 99), sub(1 * MIN, 2, 1, 0)])), [0, 0, 0], '存在しないスロット・控え・チーム');
+});
+await test('sub: ハーフタイムの交代は機会に数えない（そのあと3回できる）', () => {
+  const HT = SUBR.half * MIN, m = mkS(6, [sub(HT, 0, 1, 0), sub(HT + 1 * MIN, 0, 2, 1), sub(HT + 3 * MIN, 0, 3, 2), sub(HT + 5 * MIN, 0, 4, 3)]);
+  run(m);
+  const L = subLog(m);
+  assert.deepEqual(L.map((e) => e[5]), [1, 1, 1, 1]);
+  assert.equal(L[0][0], HT, 'ハーフタイムに実行');
+});
+await test('sub: 交代をまたぐ保存・復元が一致（復元後は出場者に合わせた能力で動く。交代前の状態へも戻せる）', () => {
+  const ch = [sub(2 * MIN, 0, 9, 2), sub(2 * MIN, 1, 0, 0)], m = mkS(7, ch), input = m.input;
+  run(m, 1 * MIN);
+  const early = snapshot(m);
+  run(m, 4 * MIN);
+  assert.deepEqual(subLog(m).map((e) => e[5]), [1, 1]);
+  assert.equal(m.rgk[11], 1.2 + 0.05 * abvec(input, 1, 0)[AB.GKR], '交代で入ったGKの届く範囲');
+  const late = snapshot(m);
+  run(m);
+  const D = digestMatch(m), fresh = createMatch(input);
+  restore(fresh, late); run(fresh);
+  assert.equal(digestMatch(fresh), D, '交代のあとの保存から');
+  restore(m, early); run(m); // 同じ試合を、交代が起きる前の保存へ戻して続ける
+  assert.equal(digestMatch(m), D, '交代の前の保存へ戻して');
 });
 
 // ── 決まりごとの検査 ──

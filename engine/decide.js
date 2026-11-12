@@ -12,11 +12,40 @@ const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得�
 const PASS_COST = 0.010; // パスを出すこと自体の手間（テンポが切れる・動きが読まれる）。つなぐだけのパスを減らす
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
 const K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
-// シュートの価値の倍率: 見込み(xG)が低いほど控えめ(SHOT_LO)、高いほど積極的(SHOT_HI)。撃てる位置ほど撃つ意識が強く、遠いシュートは控えめ
+// シュートの価値の倍率: 位置と能力だけの見込み(xG)が低いほど控えめ(SHOT_LO)、高いほど積極的(SHOT_HI)。撃てる位置ほど撃つ意識が強く、遠いシュートは控えめ
 const SHOT_LO = 0.3, SHOT_HI = 1.05, SHOT_X0 = 0.03, SHOT_XW = 0.07;
+// ゴール前の価値の整合。撃つ見込みは「コースに立つ相手（1人ごとに BLK 倍）× 圧力（PRS_S）」で割り引く（強制シュートの実測に合わせた）。
+// パスの行き先・運ぶ先の「ボールを持つ価値(xt)」も、同じ式で見積もった「そこで撃てる見込み」の CONT 倍を上限にする。
+// 上限が効くのはゴールから ZN m 以内（ZN-ZW m 以内で全面的に）。これが無いと、ゴール前で撃てる場面でも、後ろの味方へのパスや運ぶほうが得に見えて撃たなくなる。
+// （ZN を広げると、ボックスの手前でつなぎ続けて撃たなくなる・遠くから撃つ本数が増える副作用が出るので、ゴール前だけにしている）
+const BLK = 0.75, PRS_S = 0.3, ZN = 15, ZW = 6, CONT = 1.0;
 const WIN_K = 0.5; // 奪った直後の窓での、前へ進める価値・リスクの重みの変え方（指示 ±1 で ±50%）
 const K_PRS = 0.5; // 行き先の圧力による価値の割引（圧力1.5で 1-1.5*K_PRS）。人でごった返すゴール前へ突っ込まない
 const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0.25 ? f : 0.25; };
+
+// 点 (fx,fy)（攻める向きを+にした座標）から撃ったときの見込み（得点の確率の目安）。
+// 位置の見込み(xG) × シュート能力の補正 shtF × コースに立つ相手（GK以外）× 圧力
+function shotQ(m, k, dir, fx, fy, press, shtF) {
+  const { px, py } = m, o0 = (1 - k) * 11, dgx = HL - fx;
+  let block = 1;
+  for (let q = o0 + 1; q < o0 + 11; q++) {
+    const qf = px[q] * dir, qy = py[q] * dir;
+    if (qf > fx && qf < HL) {
+      const ly = fy * (1 - (qf - fx) / dgx);
+      if (Math.abs(qy - ly) < 2.2) block *= BLK;
+    }
+  }
+  return xgAt(dgx, fy) * block * shtF * (1 - PRS_S * press);
+}
+
+// ゴール前の「ボールを持つ価値」v（xt から作った値）に、そこで撃てる見込みの CONT 倍を上限にかける。遠い所は v のまま。
+function zoneCap(m, k, dir, dfx, dfy, pd, v, shtF) {
+  const dgx = HL - dfx;
+  if (dgx >= ZN) return v;
+  const cap = CONT * shotQ(m, k, dir, dfx, dfy, pd, shtF);
+  if (cap >= v) return v;
+  return v + (dgx <= ZN - ZW ? 1 : (ZN - dgx) / ZW) * (cap - v);
+}
 // 運ぶ（ドリブル）の候補: ゴールへ向かう向きを前として、前・斜め前・横・斜め後ろの7方向 × 近く(4.5m)と遠く(9m)
 const CD = [[1, 0], [0.7071, 0.7071], [0.7071, -0.7071], [0, 1], [0, -1], [-0.7071, 0.7071], [-0.7071, -0.7071]];
 const CL = [4.5, 9];
@@ -108,7 +137,7 @@ export function reactTicks(m, p, press) {
 export function carryOptions(m, i, press, hold, cb) {
   const { px, py, vx, vy, team, ab, N } = m;
   const k = team[i], dir = dirOf(N, k), A = i * NAB, o0 = (1 - k) * 11;
-  const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI];
+  const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI], shtF = 0.4 + 0.06 * ab[A + AB.SHT];
   const wa = winMode(m, k), wv = 1 + WIN_K * wa; // 奪った直後: 前へ進める価値の倍率（wv）と、失う危険の重み（LOSS_W × (1 - WIN_K×wa)）
   const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * (1 - WIN_K * wa) * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
   const held = (m.t - N[I.GOT]) * 0.05, tired = held > HOLD0 ? HOLD_W * (held - HOLD0) : 0; // 持ち続けた時間によるぶん
@@ -134,7 +163,7 @@ export function carryOptions(m, i, press, hold, cb) {
         keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
       }
       const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
-      const V = K_DRIB * (keep * (xt(dfx, dfy) * prsF(pd) * wv + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv, shtF) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
   }
@@ -217,7 +246,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (xt(dfx, dfy) * prsF(pd) * wv + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
+    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv, 0.4 + 0.06 * ab[B + AB.SHT]) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
@@ -234,16 +263,9 @@ export function decide(m, i) {
   if (!gk && sp === SP.NONE) {
     const dgx = HL - fx;
     if (dgx > 0.3 && dgx < 32) {
-      let block = 1;
-      for (let q = o0 + 1; q < o0 + 11; q++) { // GK(スロット0)以外で、シュートコースに立つ相手
-        const qf = px[q] * dir, qy = py[q] * dir;
-        if (qf > fx && qf < HL) {
-          const ly = fy * (1 - (qf - fx) / dgx);
-          if (Math.abs(qy - ly) < 2.2) block *= 0.62;
-        }
-      }
-      const xg0 = xgAt(dgx, fy) * block * (0.4 + 0.06 * ab[A + AB.SHT]) * (1 - 0.3 * press);
-      const xg = xg0 * (SHOT_LO + (SHOT_HI - SHOT_LO) * clamp((xg0 - SHOT_X0) / SHOT_XW, 0, 1));
+      const shtF = 0.4 + 0.06 * ab[A + AB.SHT], raw = xgAt(dgx, fy) * shtF; // raw = 位置と能力だけの見込み
+      const xg0 = shotQ(m, k, dir, fx, fy, press, shtF); // 相手・圧力を織り込んだ見込み
+      const xg = xg0 * (SHOT_LO + (SHOT_HI - SHOT_LO) * clamp((raw - SHOT_X0) / SHOT_XW, 0, 1));
       consider(xg + 0.004, 1, -1, HL * dir, 0);
     }
   }

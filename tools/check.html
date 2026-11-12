@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>端末間の一致確認</title>
+<style>
+  body { margin: 12px; background: #0d1117; color: #e6edf3; font: 14px/1.6 ui-monospace, monospace; }
+  button { font: inherit; padding: 8px 16px; }
+  .ok { color: #3fb950; } .ng { color: #f85149; } .dim { color: #8b949e; word-break: break-all; }
+</style>
+</head>
+<body>
+<h3>端末間の一致確認</h3>
+<p>同じ種・同じ入力の試合を、この端末で最後まで計算し、基準値（golden.json）と照らし合わせる。全部 PASS なら、この端末でも試合は同じ展開になる。</p>
+<button id="run">実行</button>
+<div id="out"></div>
+<script type="module">
+import { computeGolden, GOLDEN_SPEC } from './golden-core.js';
+import { FULL_TICKS } from '../engine/consts.js';
+
+const out = document.getElementById('out');
+const log = (s, c) => { const e = document.createElement('div'); if (c) e.className = c; e.textContent = s; out.append(e); };
+
+document.getElementById('run').onclick = async () => {
+  out.textContent = '';
+  log(navigator.userAgent, 'dim');
+  try {
+    const gold = await (await fetch('golden.json', { cache: 'no-store' })).json();
+    const t0 = performance.now();
+    const now = await computeGolden(GOLDEN_SPEC, async (seed, T) => {
+      log(`  種${seed} tick ${T} まで計算`, 'dim');
+      await new Promise((r) => setTimeout(r)); // 画面を更新させる
+    });
+    const sec = (performance.now() - t0) / 1000;
+    let bad = 0;
+    for (const seed of GOLDEN_SPEC.seeds) {
+      const a = JSON.stringify(now.cases[seed]), b = JSON.stringify(gold.cases[seed]);
+      if (a === b) log(`種${seed}: PASS`, 'ok');
+      else { bad++; log(`種${seed}: FAIL（この端末 ${a} / 基準 ${b}）`, 'ng'); }
+    }
+    if (now.engine !== gold.engine) { bad++; log(`エンジン版が違う（この端末 ${now.engine} / 基準 ${gold.engine}）`, 'ng'); }
+    const ticks = GOLDEN_SPEC.seeds.length * FULL_TICKS;
+    log(`${bad ? '不一致あり' : '全部一致'}　${sec.toFixed(1)} 秒（${Math.round(ticks / sec / 1000)}k tick/秒、1試合 ${(sec / GOLDEN_SPEC.seeds.length).toFixed(2)} 秒）`, bad ? 'ng' : 'ok');
+  } catch (e) {
+    log('エラー: ' + e, 'ng');
+  }
+};
+</script>
+</body>
+</html>

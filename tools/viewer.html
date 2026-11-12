@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>試合ビューア（段階1・仮AI）</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3; font: 14px system-ui, sans-serif; }
+  #bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px; background: #161b22; }
+  #bar input, #bar select, #bar button { font: inherit; padding: 3px 6px; background: #21262d; color: inherit; border: 1px solid #30363d; border-radius: 4px; }
+  #bar input[type=number] { width: 4.2em; }
+  #score { margin-left: auto; font-weight: 700; font-size: 16px; }
+  svg { display: block; width: 100vw; height: calc(100vh - 44px); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <label>種 <input id="seed" type="number" value="1"></label>
+  <select id="hf"></select> vs <select id="af"></select>
+  <label>力 <input id="ha" type="number" value="10"> - <input id="aa" type="number" value="10"></label>
+  <button id="go">最初から</button>
+  <button id="pz">一時停止</button>
+  <span id="spd"></span>
+  <span id="score"></span>
+</div>
+<svg id="sv" preserveAspectRatio="xMidYMid meet"></svg>
+<script type="module">
+import { createMatch, stepMatch, frame } from '../engine/match.js';
+import { sampleInput } from '../engine/sample.js';
+import { DT, TICK_HZ } from '../engine/consts.js';
+import { FORMATIONS } from '../data/formations.js';
+import { VIEWBOX, pitchSvg, actorsSvg, lerpFrame } from '../render/view2d.js';
+
+const $ = (id) => document.getElementById(id);
+for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
+$('af').value = '4-3-3';
+const sv = $('sv');
+sv.setAttribute('viewBox', VIEWBOX);
+sv.innerHTML = pitchSvg() + '<g id="act"></g>';
+const act = $('act');
+
+let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now();
+function start() {
+  m = createMatch(sampleInput(+$('seed').value || 1, {
+    home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value,
+  }));
+  prev = cur = frame(m);
+  acc = 0;
+}
+$('go').onclick = start;
+$('pz').onclick = () => { paused = !paused; $('pz').textContent = paused ? '再開' : '一時停止'; };
+for (const s of [1, 4, 16, 60]) {
+  const b = document.createElement('button');
+  b.textContent = '×' + s;
+  b.onclick = () => { speed = s; };
+  $('spd').append(b);
+}
+
+function loop(now) {
+  const dtReal = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (!paused) {
+    acc += dtReal * speed;
+    let n = 0;
+    while (acc >= DT && n < 1500) {
+      if (!stepMatch(m)) { acc = 0; break; }
+      prev = cur; cur = frame(m); acc -= DT; n++;
+    }
+    if (n >= 1500) acc = 0;
+  }
+  act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)));
+  const sec = Math.floor(cur.t / TICK_HZ);
+  $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+  requestAnimationFrame(loop);
+}
+start();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

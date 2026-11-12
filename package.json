@@ -1,0 +1,12 @@
+{
+  "name": "hi-school-football",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "高校サッカー監督シミュレーション",
+  "scripts": {
+    "test": "node tools/test.js",
+    "batch": "node tools/batch.js",
+    "golden": "node tools/golden.js --write"
+  }
+}

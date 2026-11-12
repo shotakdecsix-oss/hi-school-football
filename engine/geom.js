@@ -3,6 +3,12 @@ import { HL, HW, GOAL_HW, BALL_R } from './consts.js';
 import { atan2, log } from './core/math.js';
 
 const c01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+// ファーストタッチの出来の目安（大きいほど良い。σ=2.5 のばらつきが乗って、負ならタッチが乱れる）。
+// brain.js の onTouch（実際の接触）と decide.js のパスの見積もりが、同じ式を使う。
+// 圧力が強いほど指数的に悪化する（圧力1.5で 10*1.5+3*2.25=21.8 → 密集の中でのパスはほぼ止められない）。
+export const TOUCH_P1 = 10, TOUCH_P2 = 3;
+// pass=false はこぼれ球（パスではない自由なボール）。奪い合いなので、圧力の影響は小さい（ボールを弾き合い続けない）。
+export const touchMean = (trp, cmp, vb, press, pass = true) => 3 + 0.8 * trp + 0.2 * cmp - 0.3 * vb - (pass ? TOUCH_P1 * press + TOUCH_P2 * press * press : 5 * press);
 export const K_ROLL = 0.5; // ball.js の転がり抵抗と同じ
 export const R_CTRL = 0.8; // 足元のボールに触れられる距離 (m)
 export const REACT_BASE = 0.4; // ボールの動きを見て動き出すまでの基本の遅れ (秒)。反応(ANT)が低いと +0.02秒/点
@@ -17,7 +23,10 @@ export function timeToCover(d, vmax, acc) {
 export function xt(fx, fy) {
   const s = c01((fx + HL) / (2 * HL)), s2 = s * s, s4 = s2 * s2;
   const c = c01(1 - Math.abs(fy) / 30);
-  return (0.004 + 0.045 * s2 + 0.35 * s4 * s4) * (0.5 + 0.5 * c);
+  // ゴール前の高い価値は「ゴールが見える角度」に比例させる（中央=1、脇やゴールライン際は小さい）。
+  // 角度の近似: D2/(D2+fy²)、D2 = ゴールまでの距離² + 12。ゴールライン際を運んで回っても価値が高いままだと、撃たずにパスや運びを選び続けてしまう。
+  const dg = HL - fx, D2 = (dg > 0 ? dg * dg : 0) + 12;
+  return (0.004 + 0.045 * s2) * (0.5 + 0.5 * c) + 0.35 * s4 * s4 * (D2 / (D2 + fy * fy));
 }
 
 // シュートが決まる見込み（プロの水準）。ゴールの両ポストを見込む角 θ から 0.28θ²。

@@ -353,7 +353,8 @@ await test('sub: 時刻のあとの最初の中断で交代し、控えの能力
 });
 await test('sub: 人数（5人）・機会（3回）・同じ控えの再出場に上限があり、超えた交代は実行されない（記録の最後が0）', () => {
   const ok = (m) => { run(m); return subLog(m).map((e) => e[5]); };
-  assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 1, 0), sub(3 * MIN, 0, 2, 1), sub(5 * MIN, 0, 3, 2), sub(7 * MIN, 0, 4, 3)])), [1, 1, 1, 0], '機会は3回まで');
+  // 中断の間隔は展開しだい（数分あくこともある）。依頼を5分ずつ離して、どの依頼も別々の中断になるようにする（エンジンを変えても崩れにくい）
+  assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 1, 0), sub(6 * MIN, 0, 2, 1), sub(11 * MIN, 0, 3, 2), sub(16 * MIN, 0, 4, 3)], { ...SUBR, half: 20 })), [1, 1, 1, 0], '機会は3回まで');
   assert.deepEqual(ok(mkS(5, [1, 2, 3, 4, 5, 6].map((s, n) => sub(2 * MIN, 1, s, n)))), [1, 1, 1, 1, 1, 0], '人数は5人まで（同じ機会に6人）');
   assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 1, 0), sub(3 * MIN, 0, 2, 0)])), [1, 0], '同じ控えは1度だけ');
   assert.deepEqual(ok(mkS(5, [sub(1 * MIN, 0, 11, 0), sub(1 * MIN, 0, 1, 99), sub(1 * MIN, 2, 1, 0)])), [0, 0, 0], '存在しないスロット・控え・チーム');

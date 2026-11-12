@@ -5,13 +5,17 @@ import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP,
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { normal4 } from './core/rng.js';
-import { atan2, cos, sin, log, clamp } from './core/math.js';
-import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
+import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
 const PASS_COST = 0.010; // パスを出すこと自体の手間（テンポが切れる・動きが読まれる）。つなぐだけのパスを減らす
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
-const K_SHOOT = 1.0, K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
+const K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
+// シュートの価値の倍率: 見込み(xG)が低いほど控えめ(SHOT_LO)、高いほど積極的(SHOT_HI)。撃てる位置ほど撃つ意識が強く、遠いシュートは控えめ
+const SHOT_LO = 0.3, SHOT_HI = 1.05, SHOT_X0 = 0.03, SHOT_XW = 0.07;
+const K_PRS = 0.5; // 行き先の圧力による価値の割引（圧力1.5で 1-1.5*K_PRS）。人でごった返すゴール前へ突っ込まない
+const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0.25 ? f : 0.25; };
 // 運ぶ（ドリブル）の候補: ゴールへ向かう向きを前として、前・斜め前・横・斜め後ろの7方向 × 近く(4.5m)と遠く(9m)
 const CD = [[1, 0], [0.7071, 0.7071], [0.7071, -0.7071], [0, 1], [0, -1], [-0.7071, 0.7071], [-0.7071, -0.7071]];
 const CL = [4.5, 9];
@@ -121,7 +125,7 @@ export function carryOptions(m, i, press, hold, cb) {
         keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
       }
       const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
-      const V = K_DRIB * (keep * (xt(dfx, dfy) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      const V = K_DRIB * (keep * (xt(dfx, dfy) * prsF(pd) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
   }
@@ -193,7 +197,7 @@ export function decide(m, i) {
       const tr = 0.1 + timeToCover(Math.sqrt(rx * rx + ry * ry) - 0.5, vmax[j], acc[j]); // 受け手がそこへ着く時間
       const lag = tr - g.T;
       if (lag > 0.3) p *= clamp(1 - (lag - 0.3), 0, 1);
-      p *= clamp(0.62 + 0.035 * ab[B + AB.TRP] + 0.012 * ab[B + AB.CMP] - 0.3 * pd - (space ? 0.06 : 0), 0.3, 0.97);
+      p *= clamp(1 / (1 + exp(-0.681 * touchMean(ab[B + AB.TRP], ab[B + AB.CMP], g.vA, pd))), 0.05, 0.99) * (space ? 0.94 : 1); // 受け手が止められる確率（onTouch と同じ式。1.702/2.5=0.681）
       const sg = D * Math.max(0.02, 0.1 - 0.0045 * pas) * pe;
       p *= 1 / (1 + (sg * sg) / 10.24);
     } else {
@@ -203,7 +207,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (xt(dfx, dfy) + KEEP) - (1 - p) * (LOSS_W * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
+    const V = K_PASS * (p * (xt(dfx, dfy) * prsF(pd) + KEEP) - (1 - p) * (LOSS_W * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
@@ -228,7 +232,8 @@ export function decide(m, i) {
           if (Math.abs(qy - ly) < 2.2) block *= 0.62;
         }
       }
-      const xg = xgAt(dgx, fy) * block * (0.4 + 0.06 * ab[A + AB.SHT]) * (1 - 0.3 * press) * K_SHOOT;
+      const xg0 = xgAt(dgx, fy) * block * (0.4 + 0.06 * ab[A + AB.SHT]) * (1 - 0.3 * press);
+      const xg = xg0 * (SHOT_LO + (SHOT_HI - SHOT_LO) * clamp((xg0 - SHOT_X0) / SHOT_XW, 0, 1));
       consider(xg + 0.004, 1, -1, HL * dir, 0);
     }
   }
@@ -258,9 +263,9 @@ export function decide(m, i) {
     const ay = side * (GOAL_HW - Math.max(0.35, 1.7 - 0.08 * sht)) * dir, ax = HL * dir;
     const D = Math.sqrt((ax - x) * (ax - x) + (ay - y) * (ay - y));
     const v0 = clamp(16 + sht, 18, 32), te = D / (v0 * 0.9);
-    let vz = clamp((0.9 + 4.9 * te * te - BALL_R) / te, 0.5, 9) + normal4(seed, t, i, 34) * 1.1;
+    let vz = clamp((0.9 + 4.9 * te * te - BALL_R) / te, 0.5, 9) + normal4(seed, t, i, 34) * 1.8;
     if (vz < 0) vz = 0;
-    kick(m, i, ax, ay, v0, vz, Math.max(0.03, 0.30 - 0.012 * sht) * (1 + 0.35 * press) * clamp(D / 18, 0.6, 1.4), 0.06, 36);
+    kick(m, i, ax, ay, v0, vz, Math.max(0.045, 0.45 - 0.018 * sht) * (1 + 0.35 * press) * clamp(D / 18, 0.6, 1.4), 0.06, 36);
     N[I.SHOTS + k]++; N[I.SHOTK] = k; N[I.SHOTT] = t;
     m.log.push([t, EV.SHOT, k, i]);
     const vxb = F[F_B + 3], vyb = F[F_B + 4]; // 枠内かどうか（直進で見積もる。統計用）

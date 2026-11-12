@@ -9,12 +9,14 @@ import { ROLE } from '../data/formations.js';
 import { BALL_EV } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
-import { xt, passV0, rollRoom, timeToCover, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard } from './decide.js';
 
+const DEF_LINE_MIN = 13; // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）。6ヤードボックスに張り付いて壁になるのを防ぐ
+const SB_UP = 15, SB_TUCK = 0.35; // SBの攻撃参加: ボール側で上がる量(m)・逆サイドで絞る割合（ボールが敵陣深くのとき最大）
 const REPLAN = 8, REACT = REACT_BASE; // REACT: 守備側がボールの動きを読んで反応し始めるまでの時間（秒）
 // 役割ごとに、ボールの位置に合わせて陣形がどれだけ前後するか（攻撃時／守備時）。順は G C S D M W A F
-const KX_ATT = [0, 0.5, 0.8, 0.85, 1, 1, 1, 1];
+const KX_ATT = [0, 0.95, 1.2, 0.85, 1, 1, 1, 1]; // CBもSBも、ボールに合わせて高く上がる（最終ラインと中盤が離れない）
 const KX_DEF = [0, 0.95, 0.95, 1, 1, 1, 0.9, 0.65];
 const PRESS_BIAS = [1, 1.7, 1.15, 0.95, 1, 1.05, 1.1, 1.25]; // プレスに行きやすさ（小さいほど行く）
 const UR = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]];
@@ -121,7 +123,22 @@ function assignChase(m, k, att, recv, bfx, bfy) {
 
 // 攻撃: 保持者(c)に近い3人がサポート、前線の2人が裏へ抜ける動き。残りは動的な陣形（持ち場）
 function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
-  const { px, py, role, ab, act } = m, j0 = k * 11;
+  const { px, py, role, ab, act, fl, tx, ty } = m, j0 = k * 11;
+  if (c >= 0 && bfx > 5) { // SBのオーバーラップ: ボールが自分の側の敵陣にあるとき、保持者の外側・前へ走り込む（1人）
+    let a = -1, bd = 1e9;
+    for (let s = 1; s < 11; s++) {
+      const i = j0 + s;
+      if (role[i] !== ROLE.S || act[i] !== ACT.HOME || i === c) continue;
+      const side = fl[i] > 0 ? 1 : -1;
+      if (cpy * dir * side < -4 || px[i] * dir > bfx + 2) continue; // 反対サイドのボール／すでにボールより前
+      const dx = px[i] - cpx, dy = py[i] - cpy, d2 = dx * dx + dy * dy;
+      if (d2 < 1444 && d2 < bd) { bd = d2; a = i; }
+    }
+    if (a >= 0) {
+      const side = fl[a] > 0 ? 1 : -1, f = Math.min(line - 1, bfx + 9);
+      if (f > px[a] * dir + 3) { act[a] = ACT.RUN; tx[a] = f * dir; ty[a] = side * (HW - 6) * dir; }
+    }
+  }
   for (let n = 0; n < 3; n++) {
     let a = -1, ta = 28 * 28;
     for (let s = 1; s < 11; s++) {
@@ -352,8 +369,14 @@ function planTeam(m, k, P, own, live) {
     const i = j0 + s, r = role[i];
     let f = cx0 + (-HL + fd[i] * 2 * HL - cx0) * compr + (att ? shiftA * KX_ATT[r] : shiftD * KX_DEF[r]);
     let g = fl[i] * HW * 0.9 * (att ? (r === ROLE.W || r === ROLE.S ? 1.05 : 0.96) : 0.8);
+    if (att && r === ROLE.S) { // SBはボール側で高く上がる。逆サイドは絞って最終ラインに残る（カウンターへの備え）
+      const w = clamp((sfx + 15) / 45, 0, 1), near = clamp(0.5 + (fl[i] > 0 ? sfy : -sfy) / 20, 0, 1);
+      f += SB_UP * w * (0.35 + 0.65 * near);
+      g *= 1 - SB_TUCK * (1 - near) * w;
+    }
     g = clamp(g + (sfy - g) * (att ? 0.12 : 0.42), -HW + 2, HW - 2);
-    if (att && r >= ROLE.M) f = Math.min(f, line - 0.7); // 攻撃の選手は最終ラインを越えない
+    if (att && (r >= ROLE.M || r === ROLE.S)) f = Math.min(f, line - 0.7); // 攻撃の選手は最終ラインを越えない
+    else if (!att && r <= ROLE.D && r !== ROLE.G) f = Math.max(f, -HL + DEF_LINE_MIN); // 守備のラインは、ゴールライン際に張り付かない
     f = clamp(f, -HL + 4, HL - 3);
     hx[i] = f * dir; hy[i] = g * dir;
   }
@@ -547,7 +570,7 @@ function onTouch(m, p) {
   if (slot[p] === 0) { keeperTouch(m, p, vb); return; }
   const press = pressureAt(m, px[p], py[p], k);
   const bz = F[F_B + 2], air = bz > 0.9 ? 1.5 * (bz - 0.9) + (bz > 1.4 ? 1 : 0) : 0; // 浮いたボールは難しい（ヘディング・胸）
-  const q = 3 + 0.8 * ab[A + AB.TRP] + 0.2 * ab[A + AB.CMP] + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - 0.3 * vb - 5 * press - air + 2.5 * normal4(seed, t, p, 60);
+  const q = touchMean(ab[A + AB.TRP], ab[A + AB.CMP], vb, press, N[I.PASSK] >= 0) + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - air + 2.5 * normal4(seed, t, p, 60);
   if (q >= 0) { takeControl(m, p); return; }
   const a = atan2(F[F_B + 4], F[F_B + 3]) + normal4(seed, t, p, 61), v = Math.max(2, vb * 0.45);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;

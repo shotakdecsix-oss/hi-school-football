@@ -29,6 +29,8 @@ export function createMatch(input) {
     fd: new Float64Array(NP), fl: new Float64Array(NP), // 持ち場（奥行・横）
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
     cx0: new Float64Array(2), kick: new Uint8Array(2),
+    nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
+    ord: new Int16Array(NP), done: new Uint8Array(NP), // 追従の計算用（作業用）
     // 毎tick作り直す作業用（状態ではない）
     hx: new Float64Array(NP), hy: new Float64Array(NP), icT: new Float64Array(NP), icX: new Float64Array(NP), icY: new Float64Array(NP),
     bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1),
@@ -51,6 +53,19 @@ export function createMatch(input) {
       }
     }
     m.cx0[k] = sx / 10; // 外野手の持ち場の平均（動的な陣形の基準）
+    for (let s = 1; s < 11; s++) { // 持ち場が近い3人を「隣」にする（近いほど強く影響し合う）
+      const i = k * 11 + s, xi = form[s][0] * 2 * HL, yi = form[s][1] * HW * 0.9;
+      let c0 = -1, c1 = -1, c2 = -1, d0 = 1e9, d1 = 1e9, d2 = 1e9;
+      for (let q = 1; q < 11; q++) {
+        if (q === s) continue;
+        const dx = form[q][0] * 2 * HL - xi, dy = form[q][1] * HW * 0.9 - yi, d = Math.sqrt(dx * dx + dy * dy);
+        if (d < d0) { c2 = c1; d2 = d1; c1 = c0; d1 = d0; c0 = q; d0 = d; }
+        else if (d < d1) { c2 = c1; d2 = d1; c1 = q; d1 = d; }
+        else if (d < d2) { c2 = q; d2 = d; }
+      }
+      const cs = [c0, c1, c2], ds = [d0, d1, d2];
+      for (let u = 0; u < 3; u++) { m.nb[i * 3 + u] = k * 11 + cs[u]; m.nw[i * 3 + u] = 1 / (1 + (ds[u] * ds[u]) / 196); }
+    }
   }
   N[I.LAST] = -1;
   N[I.HALF] = 1;
@@ -179,12 +194,24 @@ export function digestMatch(m) {
 // 描画用の画面1コマぶん。描画側はエンジンの内部を見ず、これだけを受け取る（Worker から転送もしやすい形）。
 // xy = 22人の x,y を交互に並べたもの（0〜10がチーム0、11〜21がチーム1）、ball = x,y,z（メートル）、
 // own = ボールを持っている選手（いなければ -1）、act = 22人の今の役割（ACT）
+// 表示用の役割。持ち場にいて、隣に合わせて持ち場から 2m 以上ずれている選手は 10（追従）として返す
+function roleView(m) {
+  const a = Uint8Array.from(m.act);
+  for (let i = 0; i < NP; i++) {
+    if (a[i] === ACT.HOME && i % 11 !== 0) {
+      const dx = m.tx[i] - m.hx[i], dy = m.ty[i] - m.hy[i];
+      if (dx * dx + dy * dy > 4) a[i] = 10;
+    }
+  }
+  return a;
+}
+
 export function frame(m) {
   const xy = new Float32Array(2 * NP);
   for (let i = 0; i < NP; i++) { xy[2 * i] = m.px[i]; xy[2 * i + 1] = m.py[i]; }
   return {
     t: m.t, xy, ball: new Float32Array([m.F[F_B], m.F[F_B + 1], m.F[F_B + 2]]),
     score: [m.N[I.SCORE], m.N[I.SCORE + 1]], phase: m.N[I.PHASE], half: m.N[I.HALF],
-    own: m.N[I.OWN], act: Uint8Array.from(m.act),
+    own: m.N[I.OWN], act: roleView(m),
   };
 }

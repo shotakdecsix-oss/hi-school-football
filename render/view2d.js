@@ -21,9 +21,9 @@ export function pitchSvg() {
   return (pitch = s);
 }
 
-// 役割（ACT の番号順）ごとの輪の色。0=持ち場 1=保持 2=プレス 3=カバー 4=マーク 5=サポート 6=裏抜け 7=受ける 8=関わり続ける 9=ボールを追う
-export const ROLE_COL = ['#ffffff', '#ffe600', '#ff7800', '#ffaa3c', '#b45cf0', '#28d25e', '#00e0e0', '#ff40d0', '#9be29b', '#ff5050'];
-export const ROLE_LEGEND = '輪の色: 黄=保持 橙=プレス/カバー 紫=マーク 緑=サポート 水=裏抜け 桃=受ける 赤=追う 白=持ち場';
+// 役割（ACT の番号順）ごとの輪の色。0=持ち場 1=保持 2=プレス 3=カバー 4=マーク 5=サポート 6=裏抜け 7=受ける 8=関わり続ける 9=ボールを追う 10=隣に合わせて動く
+export const ROLE_COL = ['#ffffff', '#ffe600', '#ff7800', '#ffaa3c', '#b45cf0', '#28d25e', '#00e0e0', '#ff40d0', '#9be29b', '#ff5050', '#6ea8ff'];
+export const ROLE_LEGEND = '輪の色: 黄=保持 橙=プレス/カバー 紫=マーク 緑=サポート 水=裏抜け 桃=受ける 赤=追う 青=隣に合わせて動く 白=持ち場';
 
 export function actorsSvg(f, roles = false) {
   let s = '';

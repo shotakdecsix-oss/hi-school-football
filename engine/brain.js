@@ -281,6 +281,48 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
       }
     }
   }
+  followNeighbors(m, k, dir, att, bx, by);
+}
+
+// 持ち場にいる選手は、隣の味方の動き（持ち場からのずれ）に合わせて動く。
+// ボールに近い側から順に遠い側へ伝わるので、ボールから遠い選手も、隣が動けば連鎖して動く。
+const FOLLOW = [0, 0.5, 0.6, 0.75, 0.85, 0.85, 0.75, 0.65]; // 役割ごとの追従の強さ（G C S D M W A F）
+function followNeighbors(m, k, dir, att, bx, by) {
+  const { px, py, tx, ty, pc, hx, hy, act, role, nb, nw, ord, done } = m, j0 = k * 11;
+  let n = 0;
+  for (let s = 1; s < 11; s++) {
+    const i = j0 + s;
+    if (act[i] !== ACT.HOME) { done[i] = 2; continue; } // 役割のある選手は、その動きが「親」になる
+    done[i] = 0;
+    const d = (hx[i] - bx) * (hx[i] - bx) + (hy[i] - by) * (hy[i] - by);
+    let w = n++;
+    while (w > 0 && (hx[ord[w - 1]] - bx) * (hx[ord[w - 1]] - bx) + (hy[ord[w - 1]] - by) * (hy[ord[w - 1]] - by) > d) { ord[w] = ord[w - 1]; w--; }
+    ord[w] = i;
+  }
+  for (let u = 0; u < n; u++) {
+    const i = ord[u];
+    let sw = 0, ax = 0, ay = 0;
+    for (let c = 0; c < 3; c++) {
+      const j = nb[i * 3 + c];
+      if (j < 0 || done[j] === 0) continue; // まだ決まっていない（ボールから遠い側の）隣は見ない
+      const w = nw[i * 3 + c];
+      sw += w; ax += w * (tx[j] - hx[j]); ay += w * (ty[j] - hy[j]);
+    }
+    if (sw > 0) {
+      const g = FOLLOW[role[i]] / sw;
+      let dx = ax * g, dy = ay * g;
+      if (att) { // 攻撃中: 横には広がったまま（隣が寄っても付いていかない）。前線の選手は、隣が下がっても下がらない
+        dy *= 0.3;
+        if (role[i] >= ROLE.M && dx * dir < -3) dx = -3 * dir;
+      }
+      const L = Math.sqrt(dx * dx + dy * dy);
+      if (L > 15) { dx *= 15 / L; dy *= 15 / L; }
+      tx[i] = clamp(hx[i] + dx, -HL + 2, HL - 2); ty[i] = clamp(hy[i] + dy, -HW + 1.5, HW - 1.5);
+      const ex = tx[i] - px[i], ey = ty[i] - py[i], d2 = ex * ex + ey * ey;
+      pc[i] = d2 > 144 ? 0.65 : d2 > 25 ? 0.5 : 0.45;
+    }
+    done[i] = 1;
+  }
 }
 
 function planTeam(m, k, P, own, live) {
@@ -298,7 +340,7 @@ function planTeam(m, k, P, own, live) {
   // 陣形の基準は、ボールの位置そのものではなく「ならした位置」（ボールにゆっくり追従。チームは一斉に行ったり来たりしない）
   const SB = F_SB + 2 * k;
   if (!live) { F[SB] = bx; F[SB + 1] = by; } else {
-    const lim = 4.5 * DT;
+    const lim = 6 * DT;
     F[SB] += clamp(bx - F[SB], -lim, lim); F[SB + 1] += clamp(by - F[SB + 1], -lim, lim);
   }
   const bfx = bx * dir, bfy = by * dir, sfx = F[SB] * dir, sfy = F[SB + 1] * dir, line = offsideLine(m, k), cx0 = m.cx0[k];
@@ -353,7 +395,7 @@ export function movePlayers(m) {
     const dx = tx[i] - px[i], dy = ty[i] - py[i], d = Math.sqrt(dx * dx + dy * dy), cap = vmax[i] * pc[i];
     let wx = 0, wy = 0;
     const a = m.act[i], urgent = a === ACT.PRESS || a === ACT.CHASE || a === ACT.RECV || a === ACT.CARRY || a === ACT.RUN || slot[i] === 0;
-    const dz = urgent ? 0.4 : 1.2; // 目標の近くでは止まる（持ち場や間合いの細かい修正で走り回らない）
+    const dz = urgent ? 0.4 : 0.8; // 目標の近くでは止まる（持ち場や間合いの細かい修正で走り回らない）
     if (d > dz) { // 近づくほど減速（寄せる・追う役は反応を速く）
       const s = Math.min(cap, (d - dz) * (urgent ? 2.6 : 1.5)) / d; wx = dx * s; wy = dy * s;
     }

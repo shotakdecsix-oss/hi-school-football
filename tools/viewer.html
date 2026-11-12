@@ -17,6 +17,7 @@
 <div id="bar">
   <label>種 <input id="seed" type="number" value="1"></label>
   <select id="hf"></select> vs <select id="af"></select>
+  <select id="rl"></select>
   <label>力 <input id="ha" type="number" value="10"> - <input id="aa" type="number" value="10"></label>
   <button id="go">最初から</button>
   <button id="pz">一時停止</button>
@@ -32,30 +33,32 @@ let mods;
 try {
   mods = await Promise.all([
     import('../engine/match.js'), import('../engine/sample.js'), import('../engine/consts.js'),
-    import('../data/formations.js'), import('../render/view2d.js'),
+    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'),
   ]);
 } catch (e) {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }] = mods;
+const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
 $('af').value = '4-3-3';
+for (const k of Object.keys(RULES)) $('rl').add(new Option(RULES[k].name, k));
 const sv = $('sv');
 sv.setAttribute('viewBox', VIEWBOX);
 sv.innerHTML = pitchSvg() + '<g id="act"></g>';
 const act = $('act');
 $('legend').textContent = ROLE_LEGEND;
 
-let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now();
+let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '';
+const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦'], BREAK = ['', 'ハーフタイム', '延長へ', '延長ハーフタイム', 'PK戦へ'];
 function start() {
   m = createMatch(sampleInput(+$('seed').value || 1, {
-    home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value,
+    home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value, rules: RULES[$('rl').value],
   }));
   prev = cur = frame(m);
-  acc = 0;
+  acc = 0; holdUntil = 0; banner = '';
 }
 $('go').onclick = start;
 $('pz').onclick = () => { paused = !paused; $('pz').textContent = paused ? '再開' : '一時停止'; };
@@ -69,18 +72,21 @@ for (const s of [1, 4, 16, 60]) {
 function loop(now) {
   const dtReal = Math.min(0.1, (now - last) / 1000);
   last = now;
-  if (!paused) {
+  if (now < holdUntil) acc = 0; // 区間の切れ目（ハーフタイムなど）は、少し止めて見せる
+  else if (!paused) {
     acc += dtReal * speed;
     let n = 0;
     while (acc >= DT && n < 1500) {
-      if (!stepMatch(m)) { acc = 0; break; }
+      if (!stepMatch(m)) { acc = 0; banner = '試合終了'; break; }
       prev = cur; cur = frame(m); acc -= DT; n++;
+      if (cur.half !== prev.half) { banner = BREAK[prev.half]; holdUntil = now + 2500; acc = 0; break; }
     }
     if (n >= 1500) acc = 0;
+    if (now >= holdUntil && banner && banner !== '試合終了') banner = '';
   }
   act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked);
   const sec = Math.floor(cur.t / TICK_HZ);
-  $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+  $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]} ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}${banner ? '　' + banner : ''}`;
   requestAnimationFrame(loop);
 }
 start();

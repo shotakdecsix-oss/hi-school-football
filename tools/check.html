@@ -25,13 +25,12 @@ document.getElementById('run').onclick = async () => {
   try {
     // 読み込みに失敗したとき画面にエラーが出るよう、importはここで行う
     const { computeGolden, GOLDEN_SPEC } = await import('./golden-core.js');
-    const { FULL_TICKS } = await import('../engine/consts.js');
     const res = await fetch('golden.json', { cache: 'no-store' });
     if (!res.ok) throw new Error('golden.json が読めない (' + res.status + ')');
     const gold = await res.json();
     const t0 = performance.now();
     const now = await computeGolden(GOLDEN_SPEC, async (seed, T) => {
-      log(`  種${seed} tick ${T} まで計算`, 'dim');
+      log(`  種${seed} ${T === Infinity ? '最後' : T === 0 ? '短い試合（延長・PK）' : 'tick ' + T} まで計算`, 'dim');
       await new Promise((r) => setTimeout(r)); // 画面を更新させる
     });
     const sec = (performance.now() - t0) / 1000;
@@ -42,8 +41,7 @@ document.getElementById('run').onclick = async () => {
       else { bad++; log(`種${seed}: FAIL（この端末 ${a} / 基準 ${b}）`, 'ng'); }
     }
     if (now.engine !== gold.engine) { bad++; log(`エンジン版が違う（この端末 ${now.engine} / 基準 ${gold.engine}）`, 'ng'); }
-    const ticks = GOLDEN_SPEC.seeds.length * FULL_TICKS;
-    log(`${bad ? '不一致あり' : '全部一致'}　${sec.toFixed(1)} 秒（${Math.round(ticks / sec / 1000)}k tick/秒、1試合 ${(sec / GOLDEN_SPEC.seeds.length).toFixed(2)} 秒）`, bad ? 'ng' : 'ok');
+    log(`${bad ? '不一致あり' : '全部一致'}　${sec.toFixed(1)} 秒（${GOLDEN_SPEC.seeds.length} 組）`, bad ? 'ng' : 'ok');
   } catch (e) {
     log('エラー: ' + e, 'ng');
   }

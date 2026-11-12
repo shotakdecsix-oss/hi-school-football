@@ -18,7 +18,7 @@ const PROFILE = {
 const KEYS = Object.keys(AB); // 定義順 = 番号順
 
 export function sampleInput(seed, o = {}) {
-  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10 } = o;
+  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10, rules } = o; // rules は data/rules.js の値（省略 = リーグ戦）
   const team = (k, formation, base) => ({
     formation,
     players: FORMATIONS[formation].map((def, s) => {
@@ -31,5 +31,5 @@ export function sampleInput(seed, o = {}) {
       return { id: 'T' + k + 'P' + s, ab };
     }),
   });
-  return { seed, teams: [team(0, home, abilHome), team(1, away, abilAway)], changes: [] };
+  return { seed, teams: [team(0, home, abilHome), team(1, away, abilAway)], changes: [], rules };
 }

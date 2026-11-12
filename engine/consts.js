@@ -1,11 +1,12 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 4;
+export const ENGINE_VERSION = 5;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
 export const DT = 1 / TICK_HZ;
+// 試合の長さは大会ごとの規定（input.rules。data/rules.js）で決まる。下の2つは既定（リーグ戦: 45分×2）のときの長さ。
 export const HALF_TICKS = 45 * 60 * TICK_HZ;
 export const FULL_TICKS = 2 * HALF_TICKS;
 
@@ -34,7 +35,7 @@ export const N_TGT = 2 * NP; // 選手ごと: 役割の相手（マーク相手�
 export const N_TMR = 3 * NP; // 選手ごと: 保持者は次の判断までの tick、FOLLOW は残り時間
 const G = 4 * NP;
 export const I = {
-  PHASE: G, TIMER: G + 1, NEXT: G + 2, RTEAM: G + 3, LOCK: G + 4, LOCKT: G + 5, LAST: G + 6, HALF: G + 7,
+  PHASE: G, TIMER: G + 1, NEXT: G + 2, RTEAM: G + 3, LOCK: G + 4, LOCKT: G + 5, LAST: G + 6, HALF: G + 7, // HALF: 今の区間（1=前半 2=後半 3=延長前半 4=延長後半 5=PK戦）
   SCORE: G + 8, SHOTS: G + 10, // 各2つ（チーム0, 1）
   OWN: G + 12, // ボールを持っている選手（いなければ -1）
   POSS: G + 13, // ボールを保持しているチーム（直近に持った側）
@@ -51,7 +52,8 @@ export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 
 export const N_LEN = I.ST + 2 * ST_N;
 export const PHASE = { LIVE: 0, PAUSE: 1, END: 2 };
 export const NEXT = { KICKOFF: 0, RESTART: 1 };
-export const EV = { GOAL: 1, SHOT: 2, OUT: 3, HALF: 4, FULL: 5, SAVE: 6 };
+// 出来事の記録 [t, 種類, ...]。HALF=前半/延長前半が終わった [t,4,得点0,得点1]、ET=延長に入る、PK=PK戦に入る、FULL=試合終了
+export const EV = { GOAL: 1, SHOT: 2, OUT: 3, HALF: 4, FULL: 5, SAVE: 6, ET: 7, PK: 8, PKK: 9, SUB: 10 };
 
 // 選手の役割（その場の動き方）
 export const ACT = { HOME: 0, CARRY: 1, PRESS: 2, COVER: 3, MARK: 4, SUPPORT: 5, RUN: 6, RECV: 7, FOLLOW: 8, CHASE: 9 };
@@ -59,5 +61,5 @@ export const ACT = { HOME: 0, CARRY: 1, PRESS: 2, COVER: 3, MARK: 4, SUPPORT: 5,
 // ボールの軌道の予測（0.25秒刻みで PRED_N 点）
 export const PRED_N = 15;
 
-// チームkが攻める向き（+1 = +x方向）。前半はチーム0が+x、後半は入れ替わる。
-export const dirOf = (N, k) => ((k === 0) === (N[I.HALF] === 1) ? 1 : -1);
+// チームkが攻める向き（+1 = +x方向）。前半（と延長前半）はチーム0が+x、後半（と延長後半）は入れ替わる。
+export const dirOf = (N, k) => ((k === 0) === ((N[I.HALF] & 1) === 1) ? 1 : -1); // 区間ごとに攻める向きが入れ替わる

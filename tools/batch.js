@@ -1,32 +1,39 @@
 // 一括実行（同じ設定で種だけ変えて N 試合）。数値でAIの出来を確かめる道具。
-//   node tools/batch.js [--n 20] [--seed 1] [--home 4-4-2] [--away 4-4-2] [--ha 10] [--aa 10] [--flat] [--check]
+//   node tools/batch.js [--n 20] [--seed 1] [--home 4-4-2] [--away 4-4-2] [--ha 10] [--aa 10] [--rules sensyuken] [--ko] [--flat] [--check]
+// --rules: 試合規定（data/rules.js のキー。既定 sensyuken = 80分）。--ko: ノックアウト戦にする（同点なら延長・PK戦。既定はリーグ戦扱いで同点はそのまま）
 // --flat : 全選手の全能力を同じ値にする（ha/aa）。サンプルの能力ばらつきを外して、エンジン自体の偏りを見る
 // --check: 各試合を2回走らせてチェック値が一致するか確かめる（再現性の確認）
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
-import { FULL_TICKS, I, ST, ST_N, NP, HL, HW, PHASE, dirOf } from '../engine/consts.js';
+import { I, ST, ST_N, NP, HL, HW, PHASE, dirOf } from '../engine/consts.js';
+import { RULES } from '../data/rules.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i < 0 ? d : process.argv[i + 1]; };
 const n = +arg('n', 20), seed0 = +arg('seed', 1), check = process.argv.includes('--check'), flat = process.argv.includes('--flat');
-const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10) };
+const rkey = arg('rules', 'sensyuken'), ko = process.argv.includes('--ko');
+if (!RULES[rkey]) { console.log('--rules は ' + Object.keys(RULES).join(' / ') + ' から選ぶ'); process.exit(2); }
+const rules = { ...RULES[rkey], ko };
+const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules };
 const SAMPLE_EVERY = 10; // 0.5 秒ごとに動きを測る
 
 const mkInput = (seed) => {
   if (!flat) return sampleInput(seed, o);
   const team = (f, a) => ({ formation: f, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
-  return { seed, changes: [], teams: [team(o.home, o.abilHome), team(o.away, o.abilAway)] };
+  return { seed, changes: [], rules, teams: [team(o.home, o.abilHome), team(o.away, o.abilAway)] };
 };
 
 const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib'];
 const tot = [0, 1].map(() => Object.fromEntries(KEYS.map((k) => [k, 0])));
 const mv = [0, 1].map(() => ({ n: 0, far8: 0, far12: 0, disp: 0, near15: 0, near3: 0, len: 0, wid: 0, ticks: 0, poss: 0 }));
-let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0;
+let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0;
 const t0 = performance.now();
 
 for (let s = 0; s < n; s++) {
   const input = mkInput(seed0 + s), m = createMatch(input);
   while (stepMatch(m)) {
-    if (m.t % SAMPLE_EVERY || m.N[I.PHASE] !== PHASE.LIVE) continue;
+    if (m.t % SAMPLE_EVERY) continue;
+    ticksAll++;
+    if (m.N[I.PHASE] !== PHASE.LIVE) continue;
     ticksLive++;
     const pk = m.N[I.POSS]; mv[pk].poss++;
     const own = m.N[I.OWN];
@@ -54,6 +61,7 @@ for (let s = 0; s < n; s++) {
       }
     }
   }
+  allTicks += m.t * (check ? 2 : 1);
   const a = m.N[I.SCORE], b = m.N[I.SCORE + 1];
   if (a > b) w++; else if (a === b) d++; else l++;
   for (let k = 0; k < 2; k++) {
@@ -72,7 +80,7 @@ for (let s = 0; s < n; s++) {
 
 const sec = (performance.now() - t0) / 1000, runs = n * (check ? 2 : 1);
 const f1 = (x) => x.toFixed(1), pc = (x) => Math.round(100 * x) + '%';
-console.log(`${o.home}(力${o.abilHome}) vs ${o.away}(力${o.abilAway})${flat ? ' 能力一律' : ''}  ${n}試合（種 ${seed0}〜${seed0 + n - 1}）  勝${w} 分${d} 負${l}`);
+console.log(`${o.home}(力${o.abilHome}) vs ${o.away}(力${o.abilAway})${flat ? ' 能力一律' : ''}  ${n}試合（種 ${seed0}〜${seed0 + n - 1}）  規定 ${rkey}${ko ? '(ノックアウト)' : ''}  勝${w} 分${d} 負${l}`);
 console.log('1試合あたり    得点  シュ 枠内 セーブ  パス 成功率 浮球 クリア  タックル(勝)  奪取 ﾀｯﾁ失敗 ドリブル 保持率');
 for (let k = 0; k < 2; k++) {
   const t = tot[k], p = (x) => f1(x / n).padStart(6);
@@ -83,5 +91,6 @@ for (let k = 0; k < 2; k++) {
   const M = mv[k], per = M.n / Math.max(1, M.ticks);
   console.log(`  チーム${k}   ${f1(M.far8 / Math.max(1, M.ticks))}人 / ${f1(M.far12 / Math.max(1, M.ticks))}人 （外野9人中）   ${f1(M.disp / Math.max(1, M.n))}m   ${f1(M.near15 / Math.max(1, M.ticks))}人   ${f1(M.near3 / Math.max(1, M.ticks))}m   ${f1(M.len / Math.max(1, M.ticks))}m / ${f1(M.wid / Math.max(1, M.ticks))}m${per ? '' : ''}`);
 }
-console.log(`所要 ${sec.toFixed(1)} 秒（1試合 ${(sec / runs).toFixed(2)} 秒、${Math.round((runs * FULL_TICKS) / sec / 1000)}k tick/秒）${check ? `  再現性の不一致 ${bad} 件` : ''}`);
+console.log(`ボールが生きている時間 ${pc(ticksLive / Math.max(1, ticksAll))}（試合時間のうち、止まっている時間を除く）`);
+console.log(`所要 ${sec.toFixed(1)} 秒（1試合 ${(sec / runs).toFixed(2)} 秒、${Math.round(allTicks / sec / 1000)}k tick/秒）${check ? `  再現性の不一致 ${bad} 件` : ''}`);
 process.exit(bad ? 1 : 0);

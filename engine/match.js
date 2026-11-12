@@ -2,11 +2,13 @@
 // 状態は2つの型付き配列（F=小数、N=整数）と出来事の記録（log）だけ。保存・復元・比較が簡単になる。
 // 時間は固定刻み（20Hz）の整数 tick。乱数は (試合の種, tick, 選手, 用途) から作るので、状態を持たない。
 import {
-  ENGINE_VERSION, DT, HALF_TICKS, FULL_TICKS, NP, HL, HW, BALL_R, PRED_N,
+  ENGINE_VERSION, DT, TICK_HZ, NP, HL, HW, BALL_R, PRED_N,
   F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_LEN,
   I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, dirOf,
 } from './consts.js';
 import { FORMATIONS } from '../data/formations.js';
+import { normRules } from '../data/rules.js';
+import { hash4 } from './core/rng.js';
 import { AB, NAB, abVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
 import { think, movePlayers, carryBall, touches } from './brain.js';
@@ -14,14 +16,16 @@ import { decide } from './decide.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
-// input = { seed, teams: [ { formation, players: [ { id, ab } x11 ] } x2 ], changes: [] }
+// input = { seed, teams: [ { formation, players: [ { id, ab } x11 ] } x2 ], changes: [], rules }
 // players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。
-// changes は後の段階で使う（交代・戦術変更）。
+// rules は大会ごとの規定（data/rules.js。省略 = リーグ戦の90分）。changes は後の段階で使う（交代・戦術変更）。
 export function createMatch(input) {
   const F = new Float64Array(F_LEN), N = new Int32Array(N_LEN);
   const sub = (a, o) => a.subarray(o, o + NP);
+  const rules = normRules(input.rules), h = rules.half * 60 * TICK_HZ, e = rules.et * 60 * TICK_HZ;
   const m = {
     input, seed: input.seed | 0, t: 0, log: [], F, N,
+    rules, pEnd: [h, 2 * h, 2 * h + e, 2 * h + 2 * e], // 規定と、各区間（前半・後半・延長前半・延長後半）が終わる tick（入力から決まる値）
     px: sub(F, F_PX), py: sub(F, F_PY), vx: sub(F, F_VX), vy: sub(F, F_VY), tx: sub(F, F_TX), ty: sub(F, F_TY), pc: sub(F, F_PC),
     cd: sub(N, N_CD), act: sub(N, N_ACT), tgt: sub(N, N_TGT), tmr: sub(N, N_TMR),
     // 入力から決まる値（状態ではない）
@@ -151,20 +155,38 @@ export function stepMatch(m) {
     if (o >= 0 && N[N_TMR + o] <= 0) decide(m, o); // 保持者が次の行動を決める
   } else if (--N[I.TIMER] <= 0) resume(m);
   m.t++;
-  if (m.t === HALF_TICKS) {
-    N[I.HALF] = 2;
-    m.log.push([m.t, EV.HALF, N[I.SCORE], N[I.SCORE + 1]]);
-    placeKickoff(m, 1);
-  } else if (m.t >= FULL_TICKS) {
-    N[I.PHASE] = PHASE.END;
-    m.log.push([m.t, EV.FULL, N[I.SCORE], N[I.SCORE + 1]]);
-  }
+  if (m.t === m.pEnd[N[I.HALF] - 1]) endPeriod(m);
   return true;
+}
+
+// 延長のキックオフをどちらが行うか（コイントス）。延長後半は逆のチーム
+const tossTeam = (m) => hash4(m.seed, 0, 0, 800) & 1;
+
+// 区間（前半・後半・延長前半・延長後半）が終わった。次の区間のキックオフか、試合終了。
+// 前半→後半: チーム1のキックオフ。後半終了時にノックアウト戦で同点なら延長（なければPK戦）。延長後半終了時に同点ならPK戦。
+function endPeriod(m) {
+  const { N, rules } = m, p = N[I.HALF], s0 = N[I.SCORE], s1 = N[I.SCORE + 1], level = s0 === s1;
+  const go = (half, kteam) => { N[I.HALF] = half; placeKickoff(m, kteam); };
+  const finish = () => { N[I.PHASE] = PHASE.END; m.log.push([m.t, EV.FULL, s0, s1]); };
+  if (p === 1) { m.log.push([m.t, EV.HALF, s0, s1]); go(2, 1); }
+  else if (p === 2) {
+    if (rules.ko && level && rules.et > 0) { m.log.push([m.t, EV.ET, s0, s1]); go(3, tossTeam(m)); }
+    else if (rules.ko && level && rules.pk) startPK(m);
+    else finish();
+  } else if (p === 3) { m.log.push([m.t, EV.HALF, s0, s1]); go(4, 1 - tossTeam(m)); }
+  else if (level && rules.pk) startPK(m);
+  else finish();
+}
+
+// PK戦（次の段階で作る。いまは同点のまま終わる）
+function startPK(m) {
+  const { N } = m;
+  N[I.PHASE] = PHASE.END; m.log.push([m.t, EV.FULL, N[I.SCORE], N[I.SCORE + 1]]);
 }
 
 // tick が until になるまで進める。stop = { [EV.GOAL]: true } のように渡すと、その出来事が起きた tick で止まり、
 // その出来事 [t, 種類, a, b] を返す（止まらずに until / 終了まで進んだら null）。
-export function run(m, until = FULL_TICKS, stop = null) {
+export function run(m, until = Infinity, stop = null) {
   while (m.t < until && m.N[I.PHASE] !== PHASE.END) {
     const n0 = m.log.length;
     stepMatch(m);

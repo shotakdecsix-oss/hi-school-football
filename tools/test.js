@@ -9,6 +9,7 @@ import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestM
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
 import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B } from '../engine/consts.js';
+import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
 
 let fails = 0;
@@ -178,6 +179,51 @@ await test('match: 途中の保存→復元→再開が通しの結果と同じ�
   const viaJson = createMatch(input);
   restore(viaJson, JSON.parse(JSON.stringify(snapshotToJSON(snap)))); run(viaJson);
   assert.equal(digestMatch(viaJson), D, 'JSON経由');
+});
+
+// ── 大会規定（試合の長さ・延長） ──
+const SHORT = { half: 2, et: 1, pk: false, ko: true, subs: 5, subTimes: 3 }; // 4分 + 延長2分（テスト用）
+const mkR = (seed, rules) => createMatch(sampleInput(seed, { ...OPT, rules }));
+await test('rules: 大会ごとの長さ（選手権系80分・インターハイ系70分・リーグ戦90分）。省略はリーグ戦', () => {
+  const len = (r) => mkR(1, r).pEnd.map((t) => t / 1200);
+  assert.deepEqual(len(RULES.sensyuken), [40, 80, 90, 100]);
+  assert.deepEqual(len(RULES.interhigh), [35, 70, 70, 70]);
+  assert.deepEqual(len(RULES.interhighFinal), [35, 70, 80, 90]);
+  assert.deepEqual(len(undefined), [45, 90, 90, 90]);
+  assert.deepEqual(normRules(undefined), normRules(RULES.league));
+});
+await test('rules: 規定の長さで終わる。同点でもノックアウトでなければ延長しない', () => {
+  const m = mkR(2, { ...SHORT, ko: false });
+  run(m);
+  assert.equal(m.t, 4 * 1200);
+  assert.equal(m.N[I.PHASE], PHASE.END);
+  assert.equal(m.log.filter((e) => e[1] === EV.ET).length, 0);
+});
+await test('rules: ノックアウト戦は、同点なら延長（前後半）に入り、決着していれば入らない。延長をまたぐ保存・復元も一致', () => {
+  let nExtra = 0, nReg = 0;
+  for (let seed = 1; seed <= 14; seed++) {
+    const m = mkR(seed, SHORT), input = m.input;
+    run(m, m.pEnd[1]);
+    const s0 = m.N[I.SCORE], s1 = m.N[I.SCORE + 1], ets = m.log.filter((e) => e[1] === EV.ET);
+    if (s0 !== s1) { // 規定の時間で決着
+      nReg++;
+      assert.equal(m.N[I.PHASE], PHASE.END); assert.equal(m.t, m.pEnd[1]); assert.equal(ets.length, 0);
+      continue;
+    }
+    nExtra++;
+    assert.equal(m.N[I.PHASE] === PHASE.END, false, '同点なのに終わっている'); assert.equal(m.N[I.HALF], 3);
+    assert.equal(ets.length, 1); assert.equal(ets[0][0], m.pEnd[1]);
+    run(m, m.pEnd[2] - 200); // 延長前半の終わり際で保存
+    const snap = snapshot(m);
+    run(m);
+    assert.equal(m.t, m.pEnd[3]); assert.equal(m.N[I.HALF], 4); assert.equal(m.N[I.PHASE], PHASE.END);
+    assert.ok(m.log.some((e) => e[1] === EV.HALF && e[0] === m.pEnd[2]), '延長前半の終わりの記録');
+    const D = digestMatch(m), fresh = createMatch(input);
+    restore(fresh, snap); run(fresh);
+    assert.equal(digestMatch(fresh), D, '延長をまたぐ復元');
+  }
+  assert.ok(nExtra >= 1 && nReg >= 1, `延長に入った試合 ${nExtra}、規定の時間で決着した試合 ${nReg}`);
+  return `14試合: 延長 ${nExtra}、決着 ${nReg}`;
 });
 
 // ── 決まりごとの検査 ──

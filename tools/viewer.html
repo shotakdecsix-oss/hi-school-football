@@ -11,6 +11,13 @@
   #bar input[type=number] { width: 4.2em; }
   #score { margin-left: auto; font-weight: 700; font-size: 16px; }
   svg { display: block; width: 100vw; height: calc(100vh - 44px); }
+  #tac { background: #161b22; border-top: 1px solid #30363d; padding: 0 8px; }
+  #tac summary { padding: 5px 0; cursor: pointer; }
+  #tacBody { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; padding-bottom: 8px; }
+  #tacBody h4 { margin: 2px 0; font-size: 13px; }
+  #tacBody .row { font-size: 12px; margin-bottom: 4px; }
+  #tacBody .row b { color: #58a6ff; font-weight: 600; }
+  #tacBody input[type=range] { width: 100%; margin: 2px 0 0; }
 </style>
 </head>
 <body>
@@ -26,6 +33,10 @@
   <small id="legend" style="opacity:.7"></small>
   <span id="score"></span>
 </div>
+<details id="tac"><summary>戦術（チーム指示）<small style="opacity:.7">　途中で動かすと、その場から効く</small></summary>
+  <div id="tacBody"></div>
+  <button id="tacReset" style="margin:0 0 8px;font:inherit;padding:3px 8px;background:#21262d;color:inherit;border:1px solid #30363d;border-radius:4px">全部標準に戻す</button>
+</details>
 <svg id="sv" preserveAspectRatio="xMidYMid meet"></svg>
 <script type="module">
 // 読み込みに失敗したとき画面にエラーが出るよう、動的importにしている
@@ -33,18 +44,39 @@ let mods;
 try {
   mods = await Promise.all([
     import('../engine/match.js'), import('../engine/sample.js'), import('../engine/consts.js'),
-    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'),
+    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'), import('../data/tactics.js'),
   ]);
 } catch (e) {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }] = mods;
+const [{ createMatch, stepMatch, frame, setTactics }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
 $('af').value = '4-3-3';
 for (const k of Object.keys(RULES)) $('rl').add(new Option(RULES[k].name, k));
+// チーム指示のスライダー（効くものだけ。5段階: -2〜+2 → -1〜+1）。動かすとすぐ試合に反映する
+const ON = TACTICS.filter((d) => d.on);
+const sliders = [0, 1].map(() => ({}));
+const tacText = (d, v) => (v === 0 ? '標準' : (Math.abs(v) === 1 ? 'やや' : '') + (v < 0 ? d.lo : d.hi));
+const tacOf = (k) => Object.fromEntries(ON.map((d) => [d.key, +sliders[k][d.key].value / 2]));
+for (let k = 0; k < 2; k++) {
+  const col = document.createElement('div');
+  col.innerHTML = `<h4>チーム${k}（${k ? '青' : '赤'}）</h4>`;
+  for (const d of ON) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `${d.group}：${d.name} <b></b><br><input type="range" min="-2" max="2" step="1" value="0">`;
+    const inp = row.querySelector('input'), b = row.querySelector('b');
+    sliders[k][d.key] = inp;
+    inp.oninput = () => { b.textContent = tacText(d, +inp.value); if (m) setTactics(m, k, tacOf(k)); };
+    b.textContent = tacText(d, 0);
+    col.append(row);
+  }
+  $('tacBody').append(col);
+}
+$('tacReset').onclick = () => { for (let k = 0; k < 2; k++) for (const d of ON) { sliders[k][d.key].value = 0; sliders[k][d.key].oninput(); } };
 const sv = $('sv');
 sv.setAttribute('viewBox', VIEWBOX);
 sv.innerHTML = pitchSvg() + '<g id="act"></g>';
@@ -56,6 +88,7 @@ const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦']
 function start() {
   m = createMatch(sampleInput(+$('seed').value || 1, {
     home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value, rules: RULES[$('rl').value],
+    homeTac: tacOf(0), awayTac: tacOf(1),
   }));
   prev = cur = frame(m);
   acc = 0; holdUntil = 0; banner = ''; ended = false;

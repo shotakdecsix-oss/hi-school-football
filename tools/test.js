@@ -10,7 +10,9 @@ import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
+import { TACTICS, normTactics } from '../data/tactics.js';
+import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
 
@@ -380,6 +382,66 @@ await test('sub: 交代をまたぐ保存・復元が一致（復元後は出場
   assert.equal(digestMatch(fresh), D, '交代のあとの保存から');
   restore(m, early); run(m); // 同じ試合を、交代が起きる前の保存へ戻して続ける
   assert.equal(digestMatch(m), D, '交代の前の保存へ戻して');
+});
+
+// ── チーム指示 ──
+await test('tactics: 指示は -1〜+1 にそろえる（省略・範囲外・数でない値）。全部 0 の指示は、指示なしと同じ数値になる', () => {
+  const n = normTactics({ line: 5, compact: -9, pressPower: NaN, defStyle: '1', nosuch: 1 });
+  assert.deepEqual([n.line, n.compact, n.pressPower, n.defStyle], [1, -1, 0, 0]);
+  assert.equal(Object.keys(n).length, TACTICS.length);
+  assert.deepEqual(tacParams(Object.fromEntries(TACTICS.map((d) => [d.key, 0]))), tacParams(undefined));
+});
+await test('tactics: 指示を省略した試合・全部0の試合は、これまでの動きと同じ（チェック値が一致）', () => {
+  const zero = Object.fromEntries(TACTICS.map((d) => [d.key, 0]));
+  const a = createMatch(sampleInput(4, OPT)), b = createMatch(sampleInput(4, { ...OPT, homeTac: zero, awayTac: {} }));
+  run(a, 12000); run(b, 12000);
+  assert.equal(digestMatch(a), digestMatch(b));
+});
+await test('tactics: 指示ありでも、同じ入力は同じ結果で、途中の保存→復元→再開も通しと一致', () => {
+  const T = { line: 1, compact: 0.6, pressZone: -0.5, pressPower: 0.7, defStyle: -1 }, U = { line: -0.8, compact: -0.3, pressZone: 0.9, pressPower: -0.6, defStyle: 1 };
+  const input = sampleInput(8, { ...OPT, homeTac: T, awayTac: U }), a = createMatch(input), b = createMatch(input);
+  run(a, 20000); run(b, 20000);
+  assert.equal(digestMatch(a), digestMatch(b), '同じ入力');
+  const snap = snapshot(a);
+  run(a);
+  const D = digestMatch(a), fresh = createMatch(input);
+  restore(fresh, snap); run(fresh);
+  assert.equal(digestMatch(fresh), D, '保存→復元');
+});
+// 守備中（相手がボールを持ち、ボールが中盤にある間）のチーム0の陣形: 最終ライン（外野手の深い4人の平均の深さ）・縦幅・横幅。
+// press = ボールが敵陣側（自分の向きで+17.5m より先）にあるときの寄せ役（PRESS）の平均人数。tkl = タックルの回数
+function blockStats(tac, seeds = [1, 2, 3], minutes = 12) {
+  const o = { n: 0, line: 0, len: 0, wid: 0, farN: 0, farPress: 0, tkl: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      if (m.t % 10 || m.N[I.PHASE] !== PHASE.LIVE) continue;
+      const own = m.N[I.OWN];
+      if (own < 0 || m.team[own] === 0) continue;
+      const dir = dirOf(m.N, 0), bfx = m.F[F_B] * dir, fxs = [];
+      let pr = 0, y0 = 99, y1 = -99;
+      for (let i = 1; i < 11; i++) { fxs.push(m.px[i] * dir); y0 = Math.min(y0, m.py[i] * dir); y1 = Math.max(y1, m.py[i] * dir); if (m.act[i] === ACT.PRESS) pr++; }
+      fxs.sort((a, b) => a - b);
+      if (bfx > 17.5) { o.farN++; o.farPress += pr; }
+      if (bfx < -17.5 || bfx > 17.5) continue;
+      o.n++; o.line += (fxs[0] + fxs[1] + fxs[2] + fxs[3]) / 4; o.len += fxs[9] - fxs[0]; o.wid += y1 - y0;
+    }
+    o.tkl += m.N[I.ST + ST.TKL];
+  }
+  return { line: o.line / o.n, len: o.len / o.n, wid: o.wid / o.n, press: o.farPress / Math.max(1, o.farN), tkl: o.tkl };
+}
+await test('tactics: 守備の指示が陣形に効く（ライン高さ・コンパクトさ・プレス開始位置・プレス強度）', () => {
+  const base = blockStats({}), hi = blockStats({ line: 1 }), lo = blockStats({ line: -1 });
+  const cp = blockStats({ compact: 1 }), lp = blockStats({ compact: -1 }), wait = blockStats({ pressZone: -1 });
+  const pp = blockStats({ pressPower: 1 }), pm = blockStats({ pressPower: -1 });
+  const f = (x) => x.toFixed(1);
+  assert.ok(hi.line > base.line + 5, `ラインが高い: ${f(hi.line)} (標準 ${f(base.line)})`);
+  assert.ok(lo.line < base.line - 3, `ラインが低い: ${f(lo.line)} (標準 ${f(base.line)})`);
+  assert.ok(cp.len < base.len - 4 && cp.wid < base.wid - 3, `コンパクト: 縦 ${f(cp.len)} 横 ${f(cp.wid)} (標準 縦 ${f(base.len)} 横 ${f(base.wid)})`);
+  assert.ok(lp.wid > base.wid + 1.5, `間延び: 横 ${f(lp.wid)} (標準 ${f(base.wid)})`);
+  assert.ok(base.press > 0.8 && wait.press < 0.1, `引いて待つ: 敵陣側にボールがあるときの寄せ役 ${f(wait.press)} 人 (標準 ${f(base.press)} 人)`);
+  assert.ok(pp.tkl > pm.tkl * 1.2, `プレス強度: タックル ${pp.tkl} 回（強） ${pm.tkl} 回（弱）`);
+  return `最終ライン 高${f(hi.line)} 標準${f(base.line)} 低${f(lo.line)} m／縦幅 コンパクト${f(cp.len)} 標準${f(base.len)} m`;
 });
 
 // ── 決まりごとの検査 ──

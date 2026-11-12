@@ -1,30 +1,45 @@
 // 一括実行（同じ設定で種だけ変えて N 試合）。数値でAIの出来を確かめる道具。
-//   node tools/batch.js [--n 20] [--seed 1] [--home 4-4-2] [--away 4-4-2] [--ha 10] [--aa 10] [--rules sensyuken] [--ko] [--flat] [--check]
+//   node tools/batch.js [--n 20] [--seed 1] [--home 4-4-2] [--away 4-4-2] [--ha 10] [--aa 10] [--rules sensyuken] [--ko] [--flat] [--check] [--tacH line=1,compact=1] [--tacA ...]
 // --rules: 試合規定（data/rules.js のキー。既定 sensyuken = 80分）。--ko: ノックアウト戦にする（同点なら延長・PK戦。既定はリーグ戦扱いで同点はそのまま）
 // --flat : 全選手の全能力を同じ値にする（ha/aa）。サンプルの能力ばらつきを外して、エンジン自体の偏りを見る
 // --check: 各試合を2回走らせてチェック値が一致するか確かめる（再現性の確認）
+// --tacH / --tacA: 家（チーム0）・相手（チーム1）のチーム指示（data/tactics.js のキー=-1〜1 をカンマ区切り。例 line=1,pressPower=0.5）。
+//   指示を与えるか --def を付けると、守備のブロック（相手が保持しているときの陣形）の表も出す
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
-import { I, ST, ST_N, NP, HL, HW, PHASE, EV, dirOf } from '../engine/consts.js';
+import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, dirOf } from '../engine/consts.js';
 import { RULES } from '../data/rules.js';
+import { TACTICS } from '../data/tactics.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i < 0 ? d : process.argv[i + 1]; };
 const n = +arg('n', 20), seed0 = +arg('seed', 1), check = process.argv.includes('--check'), flat = process.argv.includes('--flat');
 const rkey = arg('rules', 'sensyuken'), ko = process.argv.includes('--ko');
 if (!RULES[rkey]) { console.log('--rules は ' + Object.keys(RULES).join(' / ') + ' から選ぶ'); process.exit(2); }
 const rules = { ...RULES[rkey], ko };
-const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules };
+const parseTac = (txt) => {
+  const t = {};
+  for (const kv of String(txt || '').split(',').filter(Boolean)) {
+    const [key, v] = kv.split('=');
+    if (!TACTICS.some((d) => d.key === key) || !Number.isFinite(+v)) { console.log('--tacH/--tacA は ' + TACTICS.map((d) => d.key).join(' / ') + ' を key=値(-1〜1) で、カンマ区切りで渡す'); process.exit(2); }
+    t[key] = +v;
+  }
+  return t;
+};
+const tacH = parseTac(arg('tacH', '')), tacA = parseTac(arg('tacA', ''));
+const showDef = process.argv.includes('--def') || Object.keys(tacH).length + Object.keys(tacA).length > 0;
+const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules, homeTac: tacH, awayTac: tacA };
 const SAMPLE_EVERY = 10; // 0.5 秒ごとに動きを測る
 
 const mkInput = (seed) => {
   if (!flat) return sampleInput(seed, o);
-  const team = (f, a) => ({ formation: f, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
-  return { seed, changes: [], rules, teams: [team(o.home, o.abilHome), team(o.away, o.abilAway)] };
+  const team = (f, a, tactics) => ({ formation: f, tactics, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
+  return { seed, changes: [], rules, teams: [team(o.home, o.abilHome, tacH), team(o.away, o.abilAway, tacA)] };
 };
 
 const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib', 'thr', 'gk', 'ck'];
 const tot = [0, 1].map(() => Object.fromEntries(KEYS.map((k) => [k, 0])));
 const mv = [0, 1].map(() => ({ n: 0, far8: 0, far12: 0, disp: 0, near15: 0, near3: 0, len: 0, wid: 0, ticks: 0, poss: 0 }));
+const DZ = [0, 1].map(() => Array.from({ length: 3 }, () => ({ n: 0, line: 0, len: 0, wid: 0, press: 0, cover: 0, mark: 0, near: 0 }))); // 守備中の陣形（ボール位置の3区分ごと）
 let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0, pkMatches = 0;
 const pkRes = [0, 0, 0]; // PK戦の1本ごとの結果（外れ・ゴール・セーブ）
 const t0 = performance.now();
@@ -41,6 +56,19 @@ for (let s = 0; s < n; s++) {
     for (let k = 0; k < 2; k++) {
       const dir = dirOf(m.N, k), M = mv[k], base = k * 11;
       const att = own >= 0 && m.team[own] === k; // 持っているチームだけ集計（守備側は別に len/wid だけ）
+      if (own >= 0 && !att) { // 守備中（相手が保持）: 自分の向きを+とした座標で、陣形と寄せの様子をボール位置の3区分ごとに集める
+        const bfx = m.F[F_B] * dir, Z = DZ[k][bfx < -17.5 ? 0 : bfx < 17.5 ? 1 : 2], fxs = [];
+        let ymn2 = 99, ymx2 = -99, pr = 0, cv = 0, mk = 0, nr = 99;
+        for (let s2 = 1; s2 < 11; s2++) {
+          const i = base + s2, a = m.act[i];
+          fxs.push(m.px[i] * dir);
+          if (m.py[i] * dir < ymn2) ymn2 = m.py[i] * dir; if (m.py[i] * dir > ymx2) ymx2 = m.py[i] * dir;
+          if (a === ACT.PRESS) pr++; else if (a === ACT.COVER) cv++; else if (a === ACT.MARK) mk++;
+          const dd = Math.sqrt((m.px[i] - m.F[F_B]) ** 2 + (m.py[i] - m.F[F_B + 1]) ** 2); if (dd < nr) nr = dd;
+        }
+        fxs.sort((a, b) => a - b);
+        Z.n++; Z.line += (fxs[0] + fxs[1] + fxs[2] + fxs[3]) / 4; Z.len += fxs[9] - fxs[0]; Z.wid += ymx2 - ymn2; Z.press += pr; Z.cover += cv; Z.mark += mk; Z.near += nr;
+      }
       let mn = 99, mx = -99, ymn = 99, ymx = -99;
       for (let s2 = 1; s2 < 11; s2++) {
         const i = base + s2, fx = m.px[i] * dir, fy = m.py[i] * dir;
@@ -93,6 +121,13 @@ console.log('攻撃中の動き（保持側の外野手）  陣形から8m超/12
 for (let k = 0; k < 2; k++) {
   const M = mv[k], per = M.n / Math.max(1, M.ticks);
   console.log(`  チーム${k}   ${f1(M.far8 / Math.max(1, M.ticks))}人 / ${f1(M.far12 / Math.max(1, M.ticks))}人 （外野9人中）   ${f1(M.disp / Math.max(1, M.n))}m   ${f1(M.near15 / Math.max(1, M.ticks))}人   ${f1(M.near3 / Math.max(1, M.ticks))}m   ${f1(M.len / Math.max(1, M.ticks))}m / ${f1(M.wid / Math.max(1, M.ticks))}m${per ? '' : ''}`);
+}
+if (showDef) {
+  console.log('守備のブロック（相手が保持中。自陣ゴール=-52.5、攻める向き+）  ボール位置:  自陣(〜-17)  |  中盤  |  敵陣(17〜)      各: 時間割合 最終ライン(深い4人の平均) 縦幅 横幅 寄せ/カバー/マーク人数 ボールに最も近い守備者');
+  for (let k = 0; k < 2; k++) {
+    const tt = DZ[k].reduce((s, z) => s + z.n, 0);
+    console.log(`  チーム${k}   ` + DZ[k].map((z) => (z.n ? `${pc(z.n / Math.max(1, tt)).padStart(4)} L${f1(z.line / z.n).padStart(6)} 縦${f1(z.len / z.n).padStart(5)} 横${f1(z.wid / z.n).padStart(5)} P${f1(z.press / z.n)}/C${f1(z.cover / z.n)}/M${f1(z.mark / z.n)} 近${f1(z.near / z.n).padStart(4)}m` : '-')).join('  |  '));
+  }
 }
 console.log(`ボールが生きている時間 ${pc(ticksLive / Math.max(1, ticksAll))}（試合時間のうち、止まっている時間を除く）`);
 if (ko) { const nk = pkRes[0] + pkRes[1] + pkRes[2]; console.log(`PK戦まで行った試合 ${pkMatches}/${n}` + (nk ? `  1本ごと: ゴール ${pc(pkRes[1] / nk)} セーブ ${pc(pkRes[2] / nk)} 外れ ${pc(pkRes[0] / nk)}（${nk}本）` : '')); }

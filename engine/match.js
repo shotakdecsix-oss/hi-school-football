@@ -13,12 +13,14 @@ import { AB, NAB, abVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
 import { think, movePlayers, carryBall, touches, takeControl, takerReady, standSpot, keepOut } from './brain.js';
 import { decide } from './decide.js';
+import { tacParams } from './tactic.js';
 import { pkOrder, startPK, stepPK } from './pk.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
-// input = { seed, teams: [ { formation, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
+// input = { seed, teams: [ { formation, tactics, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
 // players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。bench は控え（省略可）。
+// tactics はチーム指示（data/tactics.js。各項目 -1〜+1、省略・0 = 標準）。
 // rules は大会ごとの規定（data/rules.js。省略 = リーグ戦の90分）。
 // changes = [ { t, k, type: 'sub', slot, bench } ... ]: t(tick)以降の最初の中断（ボールが出た・ゴールのあと）かハーフタイムで、
 // チームkのスロット slot の選手を bench 番目の控えに替える。規定の人数・回数を超える交代、出場済みの控えは実行されない（記録の最後が 0）。
@@ -36,6 +38,7 @@ export function createMatch(input) {
     fd: new Float64Array(NP), fl: new Float64Array(NP), // 持ち場（奥行・横）
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
     cx0: new Float64Array(2), kick: new Uint8Array(2),
+    tac: [tacParams(input.teams[0].tactics), tacParams(input.teams[1].tactics)], // チーム指示から作った数値（engine/tactic.js）
     changes: (input.changes || []).filter((c) => c.type === 'sub').map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]), // 交代（t の順。入力から決まる値）
     nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
     ord: new Int16Array(NP), done: new Uint8Array(NP), // 追従の計算用（作業用）
@@ -79,6 +82,13 @@ export function createMatch(input) {
   N[I.HALF] = 1;
   placeKickoff(m, 0);
   return m;
+}
+
+// チーム k の指示を替える（いまの試合の続きから効く）。状態は変わらないが、入力も変わるので、この変更は記録に残らない。
+// 再現できる形で変えるなら、同じ tick に同じ指示を入れ直すこと（試合中の指示変更を入力に入れるのは後の段階）。
+export function setTactics(m, k, tactics) {
+  m.input.teams[k].tactics = tactics;
+  m.tac[k] = tacParams(tactics);
 }
 
 // 選手 i（チーム内の位置は固定）に、能力 ab の選手を入れる（入力から決まる値を作り直す）

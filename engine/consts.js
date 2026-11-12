@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 9;
+export const ENGINE_VERSION = 10;
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -26,7 +26,8 @@ export const F_B = 7 * NP; // ボール: x, y, z, vx, vy, vz, 前tickのx, 前ti
 export const F_R = F_B + 8; // 再開位置 x, y
 export const F_PASS = F_R + 2; // 直近のパスの狙い x, y
 export const F_SB = F_PASS + 2; // 陣形が基準にする「ならしたボール位置」（チームごとに x, y）。ボールにゆっくり追従する
-export const F_LEN = F_SB + 4;
+export const F_STA = F_SB + 4; // 選手ごとのスタミナ（1=万全〜0）。走ると減り、ゆっくり動くと回復する。減るほど最高速度・加速度が落ちる（engine/stamina.js）
+export const F_LEN = F_STA + NP;
 
 // 状態 N（Int32Array）の並び。選手ごとの4本のあと、全体の値
 export const N_CD = 0; // 選手ごと: クールダウン（ボールに触れない・タックルできない残り tick）
@@ -64,7 +65,8 @@ export const I = {
   SUBT: G + 39, // 各チームが最後に交代した中断の PAUSET（2つ。-1 = まだ）
   BUSED: G + 41, // 各チームの、出場済みの控えの印（ビット。2つ）
   OCC: G + 43, // 22人それぞれの、いまの出場者（-1 = 先発、0以上 = 控えの番号）
-  ST: G + 65, // 統計: チームごとに ST_N 個
+  CHGT: G + 65, // 直近にボールを保持するチームが入れ替わった（相手が奪った）tick。切り替えの窓（失った直後・奪った直後）の起点。中断・キックオフで消える
+  ST: G + 66, // 統計: チームごとに ST_N 個
 };
 export const ST_N = 15;
 export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11, THROW: 12, GKICK: 13, CORNER: 14 };

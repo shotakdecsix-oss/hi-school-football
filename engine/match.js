@@ -3,10 +3,10 @@
 // 時間は固定刻み（20Hz）の整数 tick。乱数は (試合の種, tick, 選手, 用途) から作るので、状態を持たない。
 import {
   ENGINE_VERSION, DT, TICK_HZ, NP, HL, HW, BALL_R, PRED_N,
-  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_LEN,
+  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_STA, F_LEN,
   I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, SP, SP_WAIT, GOAL_WAIT, ST, ST_N, dirOf,
 } from './consts.js';
-import { FORMATIONS } from '../data/formations.js';
+import { FORMATIONS, ROLE } from '../data/formations.js';
 import { normRules } from '../data/rules.js';
 import { hash4 } from './core/rng.js';
 import { AB, NAB, abVec } from './abil.js';
@@ -15,6 +15,8 @@ import { think, movePlayers, carryBall, touches, takeControl, takerReady, standS
 import { decide } from './decide.js';
 import { tacParams } from './tactic.js';
 import { pkOrder, startPK, stepPK } from './pk.js';
+import { fatigue, tire, rest, drainK, recoverK } from './stamina.js';
+export { staminaOf } from './stamina.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 
@@ -37,16 +39,19 @@ export function createMatch(input) {
     team: new Uint8Array(NP), slot: new Uint8Array(NP), role: new Uint8Array(NP),
     fd: new Float64Array(NP), fl: new Float64Array(NP), // 持ち場（奥行・横）
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
+    vmax0: new Float64Array(NP), acc0: new Float64Array(NP), sdr: new Float64Array(NP), srec: new Float64Array(NP), // 能力から決まる本来の最高速度・加速度と、スタミナの消耗・回復の倍率（vmax・acc は、そこから疲れ分を引いた今の値）
     cx0: new Float64Array(2), kick: new Uint8Array(2),
     tac: [tacParams(input.teams[0].tactics), tacParams(input.teams[1].tactics)], // チーム指示から作った数値（engine/tactic.js）
     changes: (input.changes || []).filter((c) => c.type === 'sub').map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]), // 交代（t の順。入力から決まる値）
     nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
     ord: new Int16Array(NP), done: new Uint8Array(NP), // 追従の計算用（作業用）
+    rest: new Int8Array(NP).fill(-1), // 攻撃中に後ろへ残す優先順（CB以外の外野手を持ち場の深い順に 0,1,2…。CB・GK は -1）。リスクの指示で、先頭から何人を残すかが決まる（入力から決まる値）
     // 毎tick作り直す作業用（状態ではない）
     hx: new Float64Array(NP), hy: new Float64Array(NP), icT: new Float64Array(NP), icX: new Float64Array(NP), icY: new Float64Array(NP),
     bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1),
     pa: new Uint8Array(NP), mpi: new Int16Array(128), mpo: new Int16Array(128), mpd: new Float64Array(128), usedO: new Uint8Array(NP),
   };
+  for (let i = 0; i < NP; i++) F[F_STA + i] = 1; // 全員が万全で始まる
   for (let k = 0; k < 2; k++) {
     const T = input.teams[k], form = FORMATIONS[T.formation];
     let sx = 0, deepest = -1;
@@ -61,6 +66,10 @@ export function createMatch(input) {
       }
     }
     m.cx0[k] = sx / 10; // 外野手の持ち場の平均（動的な陣形の基準）
+    const back = [];
+    for (let s = 1; s < 11; s++) if (form[s][2] !== ROLE.C) back.push(s);
+    back.sort((a, b) => form[a][0] - form[b][0] || a - b);
+    back.forEach((s, r) => { m.rest[k * 11 + s] = r; });
     for (let s = 1; s < 11; s++) { // 持ち場が近い3人を「隣」にする（近いほど強く影響し合う）
       const i = k * 11 + s, xi = form[s][0] * 2 * HL, yi = form[s][1] * HW * 0.9;
       let c0 = -1, c1 = -1, c2 = -1, d0 = 1e9, d1 = 1e9, d2 = 1e9;
@@ -79,6 +88,7 @@ export function createMatch(input) {
   N[I.SUBT] = N[I.SUBT + 1] = -1; N[I.PAUSET] = -1;
   for (let i = 0; i < NP; i++) N[I.OCC + i] = -1; // 全員が先発
   N[I.LAST] = -1;
+  N[I.CHGT] = NO_CHG;
   N[I.HALF] = 1;
   placeKickoff(m, 0);
   return m;
@@ -95,8 +105,10 @@ export function setTactics(m, k, tactics) {
 function setPlayerAb(m, i, ab) {
   const v = abVec(ab);
   m.ab.set(v, i * NAB);
-  m.vmax[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
-  m.acc[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)
+  m.vmax0[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
+  m.acc0[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)
+  m.sdr[i] = drainK(v[AB.STM]); m.srec[i] = recoverK(v[AB.STM]);
+  fatigue(m, i); // 疲れ分を引いた今の値（vmax・acc）
   m.rgk[i] = m.slot[i] === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
 }
 
@@ -124,12 +136,15 @@ function applySubs(m, brk) {
         N[I.SUBN + k]++;
         if (newOcc) { N[I.SUBO + k]++; N[I.SUBT + k] = N[I.PAUSET]; }
         N[I.BUSED + k] |= 1 << b; N[I.OCC + k * 11 + s] = b;
+        m.F[F_STA + k * 11 + s] = 1; // 控えの選手は万全
         setPlayerAb(m, k * 11 + s, bench[b].ab);
       }
     }
     m.log.push([m.t, EV.SUB, k, s, b, ok]);
   }
 }
+
+const NO_CHG = -1000000; // 切り替えの窓がない（直近に奪い合いがない）印
 
 function placeKickoff(m, kteam) {
   const { F, N, px, py, vx, vy, tx, ty, pc, team, fd, fl, cd, act, tgt, tmr } = m;
@@ -145,14 +160,14 @@ function placeKickoff(m, kteam) {
   F[F_B] = F[F_B + 1] = F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = F[F_B + 6] = F[F_B + 7] = 0;
   F[F_B + 2] = BALL_R;
   N[I.LOCK] = 40; N[I.LOCKT] = kteam; N[I.PHASE] = PHASE.LIVE;
-  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE; N[I.CHGT] = NO_CHG;
 }
 
 function pause(m, ticks, next, rteam) {
   const N = m.N;
   N[I.PHASE] = PHASE.PAUSE; N[I.TIMER] = ticks; N[I.NEXT] = next; N[I.RTEAM] = rteam;
   N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam; N[I.SETP] = SP.NONE;
-  N[I.PAUSET] = m.t;
+  N[I.PAUSET] = m.t; N[I.CHGT] = NO_CHG;
   applySubs(m, false);
 }
 
@@ -225,6 +240,7 @@ export function stepMatch(m) {
   if (ph === PHASE.PK) { stepPK(m); m.t++; return true; }
   think(m);
   movePlayers(m);
+  tire(m);
   if (ph === PHASE.LIVE) {
     let ev;
     if (N[I.OWN] >= 0) ev = carryBall(m);
@@ -250,7 +266,7 @@ const tossTeam = (m) => hash4(m.seed, 0, 0, 800) & 1;
 // 前半→後半: チーム1のキックオフ。後半終了時にノックアウト戦で同点なら延長（なければPK戦）。延長後半終了時に同点ならPK戦。
 function endPeriod(m) {
   const { N, rules } = m, p = N[I.HALF], s0 = N[I.SCORE], s1 = N[I.SCORE + 1], level = s0 === s1;
-  const go = (half, kteam) => { N[I.HALF] = half; placeKickoff(m, kteam); };
+  const go = (half, kteam) => { rest(m); N[I.HALF] = half; placeKickoff(m, kteam); }; // 区間の間の休憩（ハーフタイムなど）で、少し回復する
   const finish = () => { N[I.PHASE] = PHASE.END; m.log.push([m.t, EV.FULL, s0, s1]); };
   if (p === 1) { m.log.push([m.t, EV.HALF, s0, s1]); applySubs(m, true); go(2, 1); }
   else if (p === 2) {

@@ -32,6 +32,7 @@
   <label><input id="roles" type="checkbox" checked> 役割の色</label>
   <small id="legend" style="opacity:.7"></small>
   <span id="score"></span>
+  <span id="sta" title="外野手10人のスタミナの平均（100%=万全）。走ると減り、減るほど遅くなる。ハーフタイムと交代で回復" style="margin-left:12px;opacity:.85"></span>
 </div>
 <details id="tac"><summary>戦術（チーム指示）<small style="opacity:.7">　途中で動かすと、その場から効く</small></summary>
   <div id="tacBody"></div>
@@ -50,7 +51,7 @@ try {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame, setTactics }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }] = mods;
+const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
@@ -121,6 +122,7 @@ function loop(now) {
   act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked);
   const sec = Math.floor(cur.t / TICK_HZ);
   $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]}${cur.half === 5 ? ` ${cur.pk[0]} - ${cur.pk[1]}` : ` ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`}${banner ? '　' + banner : ''}`;
+  $('sta').textContent = `体力 赤${Math.round(100 * staminaOf(m, 0))}% 青${Math.round(100 * staminaOf(m, 1))}%`;
   requestAnimationFrame(loop);
 }
 start();

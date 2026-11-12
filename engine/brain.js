@@ -10,7 +10,7 @@ import { BALL_EV } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
-import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard } from './decide.js';
+import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 
 // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）は、指示（ライン高さ）から決まる m.tac[k].floorD（標準 13）。6ヤードボックスに張り付いて壁になるのを防ぐ
@@ -22,6 +22,12 @@ const KX_DEF = [0, 0.95, 0.95, 1, 1, 1, 0.9, 0.65];
 const PRESS_BIAS = [1, 1.7, 1.15, 0.95, 1, 1.05, 1.1, 1.25]; // プレスに行きやすさ（小さいほど行く）
 const UR = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]];
 const CH = [-0.65, -0.33, 0, 0.33, 0.65]; // 裏へ抜ける動きの横位置（ピッチ幅に対する割合）
+
+// いま使う守備の数値。ボールを失った直後の窓（指示 onLose。失ってから loseW tick の間）は、切り替え用の数値（tacT）に替わる
+function tcOf(m, k) {
+  const c = m.tac[k];
+  return c.loseW > 0 && m.N[I.PHASE] === PHASE.LIVE && m.N[I.POSS] !== k && m.t - m.N[I.CHGT] < c.loseW ? c.tacT : c;
+}
 
 // 自由なボールの軌道を0.25秒刻みで予測し、各選手が触れる最も早い時刻と場所を求める
 function predictBall(m) {
@@ -124,12 +130,14 @@ function assignChase(m, k, att, recv, bfx, bfy) {
 
 // 攻撃: 保持者(c)に近い3人がサポート、前線の2人が裏へ抜ける動き。残りは動的な陣形（持ち場）
 function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
-  const { px, py, role, ab, act, fl, tx, ty } = m, j0 = k * 11;
+  const { px, py, role, ab, act, fl, tx, ty, rest } = m, j0 = k * 11;
+  const rn = m.tac[k].restN, wa = winMode(m, k); // rn: 後ろに残す追加の人数（リスク）、wa: 奪った直後の窓の指示値
+  const held = (i) => rest[i] >= 0 && rest[i] < rn;
   if (c >= 0 && bfx > 5) { // SBのオーバーラップ: ボールが自分の側の敵陣にあるとき、保持者の外側・前へ走り込む（1人）
     let a = -1, bd = 1e9;
     for (let s = 1; s < 11; s++) {
       const i = j0 + s;
-      if (role[i] !== ROLE.S || act[i] !== ACT.HOME || i === c) continue;
+      if (role[i] !== ROLE.S || act[i] !== ACT.HOME || i === c || held(i)) continue;
       const side = fl[i] > 0 ? 1 : -1;
       if (cpy * dir * side < -4 || px[i] * dir > bfx + 2) continue; // 反対サイドのボール／すでにボールより前
       const dx = px[i] - cpx, dy = py[i] - cpy, d2 = dx * dx + dy * dy;
@@ -140,11 +148,11 @@ function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
       if (f > px[a] * dir + 3) { act[a] = ACT.RUN; tx[a] = f * dir; ty[a] = side * (HW - 6) * dir; }
     }
   }
-  for (let n = 0; n < 3; n++) {
+  for (let n = 0; n < (wa < -0.3 ? 4 : 3); n++) { // キープの指示では、保持者の近くに 4 人がサポートに入る
     let a = -1, ta = 28 * 28;
     for (let s = 1; s < 11; s++) {
       const i = j0 + s;
-      if (act[i] !== ACT.HOME || i === c) continue;
+      if (act[i] !== ACT.HOME || i === c || held(i)) continue;
       if (role[i] === ROLE.C && bfx > 5) continue; // 最終ラインのCBは残る
       const dx = px[i] - cpx, dy = py[i] - cpy, d2 = dx * dx + dy * dy;
       if (d2 < ta) { ta = d2; a = i; }
@@ -153,12 +161,13 @@ function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
     act[a] = ACT.SUPPORT;
     supportSpot(m, k, a, dir, cpx, cpy, line);
   }
-  if (c >= 0 && cpx * dir > -25) {
-    for (let n = 0; n < 2; n++) {
+  if (c >= 0 && cpx * dir > -25 - (wa > 0 ? 25 * wa : 0)) { // 縦に速く: 自陣深くからでも前線が走り出す。人数も増える（最大4人）。キープ: 走る人数が減る
+    const nRun = wa > 0 ? 2 + (wa > 0.35 ? 1 : 0) + (wa > 0.8 ? 1 : 0) : wa < -0.3 ? (wa < -0.8 ? 0 : 1) : 2;
+    for (let n = 0; n < nRun; n++) {
       let a = -1, ba = -1e9;
       for (let s = 1; s < 11; s++) {
         const i = j0 + s, r = role[i];
-        if (act[i] !== ACT.HOME || i === c) continue;
+        if (act[i] !== ACT.HOME || i === c || held(i)) continue;
         if (r !== ROLE.F && r !== ROLE.W && r !== ROLE.A) continue;
         if (px[i] * dir < bfx - 6) continue; // ボールよりだいぶ後ろの選手は走らない
         const dx = px[i] - cpx, dy = py[i] - cpy, d = Math.sqrt(dx * dx + dy * dy);
@@ -176,8 +185,8 @@ function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
 // 守備: ボールに近い1人がプレス、次の1人がカバー、残りは近くの相手をマーク（マークする相手がいなければ持ち場）
 function assignDefense(m, k, dir, bx, by, own) {
   const { px, py, vmax, role, act, tgt, pa, hx, hy, mpi, mpo, mpd, usedO } = m;
-  const j0 = k * 11, o0 = (1 - k) * 11, tc = m.tac[k];
-  let a = -1, b = -1, ta = 1e9, tb = 1e9;
+  const j0 = k * 11, o0 = (1 - k) * 11, tc = tcOf(m, k);
+  let a = -1, b = -1, c3 = -1, ta = 1e9, tb = 1e9, tc3 = 1e9;
   const press = bx * dir <= tc.zMax; // プレス開始位置: ボールがこれより敵陣側にあるうちは、寄せずに形を保つ
   for (let s = 1; s < 11 && press; s++) {
     const i = j0 + s;
@@ -186,10 +195,13 @@ function assignDefense(m, k, dir, bx, by, own) {
     if (d > tc.pressR) continue;
     let tt = (d / vmax[i]) * PRESS_BIAS[role[i]];
     if (pa[i] === ACT.PRESS) tt *= 0.8; // 役割がころころ変わらないように
-    if (tt < ta) { b = a; tb = ta; a = i; ta = tt; } else if (tt < tb) { b = i; tb = tt; }
+    if (tt < ta) { c3 = b; tc3 = tb; b = a; tb = ta; a = i; ta = tt; } else if (tt < tb) { c3 = b; tc3 = tb; b = i; tb = tt; } else if (tt < tc3) { c3 = i; tc3 = tt; }
   }
   if (a >= 0) act[a] = ACT.PRESS;
-  if (b >= 0 && tb < 5) { act[b] = ACT.COVER; tgt[b] = a; }
+  // 標準はカバー1人。ゲーゲンプレスの窓（nPress 2〜3）では、近い2番目・3番目も寄せる（tgt = 主役。別の角度から保持者を囲む）
+  if (tc.nPress >= 2 && b >= 0 && tb < 2.6) { act[b] = ACT.PRESS; tgt[b] = a; }
+  else if (b >= 0 && tb < 5) { act[b] = ACT.COVER; tgt[b] = a; }
+  if (tc.nPress >= 3 && c3 >= 0 && tc3 < 2.8) { act[c3] = ACT.PRESS; tgt[c3] = a; }
   let n = 0;
   for (let s = 1; s < 11; s++) {
     const i = j0 + s;
@@ -227,7 +239,7 @@ function planGK(m, k, dir, own, att, bfx, bfy) {
     return;
   }
   const dgx = bfx + HL, dg = Math.sqrt(dgx * dgx + bfy * bfy) + 1e-6;
-  const up = m.tac[k].gkUp, gkd = att ? clamp(0.1 * dg, 2, 13) : clamp(0.12 * dg + 0.8 + up, 1.2, up > 0 ? 7 + up : 7); // 高いラインのときは、GKも前へ出て背後をカバーする
+  const up = tcOf(m, k).gkUp, gkd = att ? clamp(0.1 * dg, 2, 13) : clamp(0.12 * dg + 0.8 + up, 1.2, up > 0 ? 7 + up : 7); // 高いラインのときは、GKも前へ出て背後をカバーする
   let fx = -HL + (dgx / dg) * gkd, fy = clamp((bfy / dg) * gkd, -GOAL_HW - 2, GOAL_HW + 2);
   pc[i] = 0.5;
   if (own < 0 && N[I.PHASE] === PHASE.LIVE) {
@@ -245,7 +257,7 @@ function planGK(m, k, dir, own, att, bfx, bfy) {
 // 役割に応じて、毎tickの目標位置と走る強さを決める
 function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
   const { F, px, py, tx, ty, pc, act, tgt, tmr, hx, hy, icT, icX, icY, ab, role } = m;
-  const j0 = k * 11, gx = -dir * HL, tc = m.tac[k];
+  const j0 = k * 11, gx = -dir * HL, tc = tcOf(m, k);
   planGK(m, k, dir, own, att, bfx, bfy);
   for (let s = 1; s < 11; s++) {
     const i = j0 + s;
@@ -256,7 +268,11 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         const ex = bx + F[F_B + 3] * 0.4, ey = by + F[F_B + 4] * 0.4;
         let ux = gx - ex, uy = -ey, L = Math.sqrt(ux * ux + uy * uy);
         if (L < 1e-6) L = 1;
-        tx[i] = ex + (ux / L) * jd; ty[i] = ey + (uy / L) * jd;
+        const nx = ux / L, ny = uy / L;
+        if (tgt[i] >= 0) { // 追加のプレス役（ゲーゲンプレス）: 主役の脇から、自分のいる側へ55°ずらした位置へ寄せる
+          const sd = nx * (py[i] - ey) - ny * (px[i] - ex) >= 0 ? 1 : -1;
+          tx[i] = ex + (0.5736 * nx - sd * 0.8192 * ny) * (jd + 0.5); ty[i] = ey + (0.5736 * ny + sd * 0.8192 * nx) * (jd + 0.5);
+        } else { tx[i] = ex + nx * jd; ty[i] = ey + ny * jd; }
         const dx = bx - px[i], dy = by - py[i];
         pc[i] = dx * dx + dy * dy > 64 ? 1 : tc.pcNear; // 遠いときだけ全力（強度が高いほど近くでも全力）
         break;
@@ -283,7 +299,8 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         if (tc.zoneBlend > 0) { mx += (hx[i] - mx) * tc.zoneBlend; my += (hy[i] - my) * tc.zoneBlend; } // ゾーン: 持ち場の側へ戻る
         const ddx = mx - hx[i], ddy = my - hy[i];
         if (ddx * ddx + ddy * ddy > tc.leash2) { mx = hx[i]; my = hy[i]; } // 持ち場から離れすぎるときは持ち場へ
-        tx[i] = clamp(mx, -HL, HL); ty[i] = clamp(my, -HW, HW); pc[i] = 0.5;
+        tx[i] = clamp(mx, -HL, HL); ty[i] = clamp(my, -HW, HW); pc[i] = tc.markPc;
+        if (tc.recPc > 0) { const rx = tx[i] - px[i], ry = ty[i] - py[i]; if (rx * rx + ry * ry > 25 && pc[i] < tc.recPc) pc[i] = tc.recPc; } // 失った直後に戻る: 遠い持ち場へ全力で
         break;
       }
       case ACT.SUPPORT: pc[i] = 0.55; break;
@@ -303,8 +320,9 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         break;
       default: {
         tx[i] = hx[i]; ty[i] = hy[i];
-        const dx = hx[i] - px[i], dy = hy[i] - py[i];
-        pc[i] = dx * dx + dy * dy > 144 ? 0.65 : 0.45;
+        const dx = hx[i] - px[i], dy = hy[i] - py[i], d2 = dx * dx + dy * dy;
+        pc[i] = d2 > 144 ? 0.65 : 0.45;
+        if (tc.recPc > 0 && d2 > 25 && pc[i] < tc.recPc) pc[i] = tc.recPc;
       }
     }
   }
@@ -315,7 +333,7 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
 // ボールに近い側から順に遠い側へ伝わるので、ボールから遠い選手も、隣が動けば連鎖して動く。
 const FOLLOW = [0, 0.5, 0.6, 0.75, 0.85, 0.85, 0.75, 0.65]; // 役割ごとの追従の強さ（G C S D M W A F）
 function followNeighbors(m, k, dir, att, bx, by) {
-  const { px, py, tx, ty, pc, hx, hy, act, role, nb, nw, ord, done } = m, j0 = k * 11;
+  const { px, py, tx, ty, pc, hx, hy, act, role, nb, nw, ord, done } = m, j0 = k * 11, rp = tcOf(m, k).recPc;
   let n = 0;
   for (let s = 1; s < 11; s++) {
     const i = j0 + s;
@@ -347,6 +365,7 @@ function followNeighbors(m, k, dir, att, bx, by) {
       tx[i] = clamp(hx[i] + dx, -HL + 2, HL - 2); ty[i] = clamp(hy[i] + dy, -HW + 1.5, HW - 1.5);
       const ex = tx[i] - px[i], ey = ty[i] - py[i], d2 = ex * ex + ey * ey;
       pc[i] = d2 > 144 ? 0.65 : d2 > 25 ? 0.5 : 0.45;
+      if (rp > 0 && d2 > 25 && pc[i] < rp) pc[i] = rp;
     }
     done[i] = 1;
   }
@@ -354,7 +373,7 @@ function followNeighbors(m, k, dir, att, bx, by) {
 
 function planTeam(m, k, P, own, live) {
   const { F, N, px, py, team, role, fd, fl, act, tgt, tmr, hx, hy, pa } = m;
-  const dir = dirOf(N, k), att = P === k, j0 = k * 11, tc = m.tac[k];
+  const dir = dirOf(N, k), att = P === k, j0 = k * 11, tc = tcOf(m, k), wa = att ? winMode(m, k) : 0;
   const loose = live && own < 0, recv = loose ? N[I.RECV] : -1;
   let bx = F[F_B], by = F[F_B + 1];
   if (!live) {
@@ -379,14 +398,16 @@ function planTeam(m, k, P, own, live) {
     const i = j0 + s, r = role[i];
     let f = cx0 + (-HL + fd[i] * 2 * HL - cx0) * compr + (att ? shiftA * KX_ATT[r] : shiftD * KX_DEF[r]);
     if (!att) f += tc.lineOff * LINE_W[r] + tc.frontOff * FRONT_W[r]; // 守備: ライン高さ（ブロック全体）とプレス開始位置（前線の押し上げ）
+    else if (wa !== 0 && r >= ROLE.M) f += 5 * wa; // 奪った直後: 縦に速く(+)は前線が前へ、キープ(-)は少し下がって寄る
     let g = fl[i] * HW * 0.9 * (att ? (r === ROLE.W || r === ROLE.S ? 1.05 : 0.96) : tc.widthD);
     if (att && r === ROLE.S) { // SBはボール側で高く上がる。逆サイドは絞って最終ラインに残る（カウンターへの備え）
       const w = clamp((sfx + 15) / 45, 0, 1), near = clamp(0.5 + (fl[i] > 0 ? sfy : -sfy) / 20, 0, 1);
       f += SB_UP * w * (0.35 + 0.65 * near);
-      g *= 1 - SB_TUCK * (1 - near) * w;
+      g *= 1 - SB_TUCK * tc.tuckK * (1 - near) * w;
     }
     g = clamp(g + (sfy - g) * (att ? 0.12 : tc.shiftY), -HW + 2, HW - 2);
     if (att && (r >= ROLE.M || r === ROLE.S)) f = Math.min(f, line - 0.7); // 攻撃の選手は最終ラインを越えない
+    if (att && m.rest[i] >= 0 && m.rest[i] < tc.restN) f = Math.min(f, 3 + 0.25 * sfx); // リスクが低い指示: CB以外の深い選手は、ハーフウェー付近（ボールが敵陣深くでも 10m 前後まで）に残る（カウンターへの備え）
     else if (!att && r <= ROLE.D && r !== ROLE.G) f = Math.max(f, -HL + tc.floorD); // 守備のラインは、ゴールライン際に張り付かない
     f = clamp(f, -HL + 4, HL - 3);
     hx[i] = f * dir; hy[i] = g * dir;
@@ -549,13 +570,14 @@ export function takeControl(m, p) {
   const { F, N, team, slot, px, py, vx, vy, tx, ty, pc, act, tgt, tmr } = m;
   const k = team[p], pk = N[I.PASSK];
   if (pk >= 0) N[I.ST + k * ST_N + (pk === k ? ST.PASSOK : ST.ICPT)]++; // パス成功か、相手に奪われたか
+  if (N[I.POSS] !== k) N[I.CHGT] = m.t; // ボールを持つチームが入れ替わった（切り替えの窓の起点）
   N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; N[I.LAST] = p; N[I.RECV] = -1; N[I.SHOTK] = -1; N[I.GOT] = m.t;
   act[p] = ACT.CARRY; tgt[p] = -1;
   if (N[I.SETP] > 0) { tmr[p] = 14; tx[p] = px[p]; ty[p] = py[p]; pc[p] = 0; } // 再開: その場で少し周りを見てから蹴る
   else {
     const press = pressureAt(m, px[p], py[p], k);
     const rt = reactTicks(m, p, press);
-    tmr[p] = slot[p] === 0 ? rt + 30 : Math.round(0.65 * rt); // GKは持ってから少し間を取る。外野手は受ける前に周りを見ているので、最初の判断が早い
+    tmr[p] = slot[p] === 0 ? rt + 30 : Math.round(0.65 * rt * (1 - 0.35 * winMode(m, k))); // 奪った直後の窓: 縦に速く(+)は判断が速く、キープ(-)は落ち着く。 GKは持ってから少し間を取る。外野手は受ける前に周りを見ているので、最初の判断が早い
     if (slot[p] === 0) { tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5; }
     else startCarry(m, p, press); // 止まらずに運び出す（相手から離れる・空いた方・今の勢い）
   }
@@ -627,7 +649,7 @@ function tackles(m, o) {
   const cs = dd > 0.01 ? ((vx[j] - vx[o]) * rx + (vy[j] - vy[o]) * ry) / dd : 0; // 寄せる速さ
   const qd = 0.6 * ab[B + AB.TCK] + 0.3 * ab[B + AB.AGG] + 0.4 * clamp(cs, 0, 5);
   const qc = 0.6 * ab[A + AB.DRI] + 0.25 * ab[A + AB.BAL] + 0.15 * ab[A + AB.STR];
-  if (f4(seed, t, j, 66) >= (0.05 + 0.004 * ab[B + AB.AGG]) * m.tac[kj].tklK) return; // 間合いに入っても、毎tick足を出すわけではない（プレス強度が高いほど出しやすい）
+  if (f4(seed, t, j, 66) >= (0.05 + 0.004 * ab[B + AB.AGG]) * tcOf(m, kj).tklK) return; // 間合いに入っても、毎tick足を出すわけではない（プレス強度が高いほど出しやすい）
   const mg = qd - qc + 2.2 * normal4(seed, t, j, 64) - 0.5;
   N[I.ST + kj * ST_N + ST.TKL]++;
   if (mg < 0) { cd[j] = mg < -4 ? 40 : 30; return; } // 取れない（大きく外すとかわされて遅れる）

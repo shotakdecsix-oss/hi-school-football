@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
-import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner } from '../engine/match.js';
+import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf } from '../engine/match.js';
 import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
@@ -351,7 +351,7 @@ await test('sub: 時刻のあとの最初の中断で交代し、控えの能力
   const bench = Array.from(abVec(input.teams[0].bench[2].ab));
   assert.deepEqual(Array.from(m.ab.subarray(9 * NAB, 10 * NAB)), bench);
   assert.notDeepEqual(before, bench);
-  assert.equal(m.vmax[9], 5.8 + 0.22 * bench[AB.SPD]);
+  assert.equal(m.vmax0[9], 5.8 + 0.22 * bench[AB.SPD]);
 });
 await test('sub: 人数（5人）・機会（3回）・同じ控えの再出場に上限があり、超えた交代は実行されない（記録の最後が0）', () => {
   const ok = (m) => { run(m); return subLog(m).map((e) => e[5]); };
@@ -410,7 +410,7 @@ await test('tactics: 指示ありでも、同じ入力は同じ結果で、途�
 });
 // 守備中（相手がボールを持ち、ボールが中盤にある間）のチーム0の陣形: 最終ライン（外野手の深い4人の平均の深さ）・縦幅・横幅。
 // press = ボールが敵陣側（自分の向きで+17.5m より先）にあるときの寄せ役（PRESS）の平均人数。tkl = タックルの回数
-function blockStats(tac, seeds = [1, 2, 3], minutes = 12) {
+function blockStats(tac, seeds = [1, 2, 3, 4, 5, 6], minutes = 10) {
   const o = { n: 0, line: 0, len: 0, wid: 0, farN: 0, farPress: 0, tkl: 0 };
   for (const seed of seeds) {
     const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
@@ -442,6 +442,100 @@ await test('tactics: 守備の指示が陣形に効く（ライン高さ・コ�
   assert.ok(base.press > 0.8 && wait.press < 0.1, `引いて待つ: 敵陣側にボールがあるときの寄せ役 ${f(wait.press)} 人 (標準 ${f(base.press)} 人)`);
   assert.ok(pp.tkl > pm.tkl * 1.2, `プレス強度: タックル ${pp.tkl} 回（強） ${pm.tkl} 回（弱）`);
   return `最終ライン 高${f(hi.line)} 標準${f(base.line)} 低${f(lo.line)} m／縦幅 コンパクト${f(cp.len)} 標準${f(base.len)} m`;
+});
+
+
+// 切り替え（失った直後・奪った直後）とリスクの集計。チーム0だけに指示を与え、相手は標準
+function transStats(tac, seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], minutes = 15) {
+  const o = { lost: 0, reg5: 0, n3: 0, near: 0, cen: 0, prog: 0, progN: 0, sb: 0, sbN: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
+    let lastC = -1e9, prev = null;
+    const p3 = [], p4 = [];
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      const cc = m.N[I.CHGT];
+      if (cc !== lastC) {
+        lastC = cc;
+        if (cc >= 0) {
+          const w = m.N[I.POSS];
+          if (w === 1) { o.lost++; if (m.F[F_B] * dirOf(m.N, 0) > 5) p3.push(cc + 60); } else p4.push([cc + 80, m.F[F_B] * dirOf(m.N, 0)]);
+          if (prev && prev[1] === 1 && w === 0 && cc - prev[0] <= 100) o.reg5++; // 失ったあと 5秒以内に奪い返した
+          prev = [cc, w];
+        }
+      }
+      if (p3.length && p3[0] <= m.t) { // 敵陣でボールを失って3秒後: チームの重心（攻める向きを+とした x の平均）と、ボールの 8m 以内にいる人数
+        p3.shift();
+        const dir = dirOf(m.N, 0);
+        for (let i = 1; i < 11; i++) { o.cen += (m.px[i] * dir) / 10; if ((m.px[i] - m.F[F_B]) ** 2 + (m.py[i] - m.F[F_B + 1]) ** 2 < 64) o.near++; }
+        o.n3++;
+      }
+      if (p4.length && p4[0][0] <= m.t) { const [, f0] = p4.shift(); o.prog += m.F[F_B] * dirOf(m.N, 0) - f0; o.progN++; } // 奪って4秒後のボールの前進
+      if (m.t % 10 === 0 && m.N[I.PHASE] === PHASE.LIVE && m.N[I.OWN] >= 0 && m.team[m.N[I.OWN]] === 0) { // 攻撃中（ボールが敵陣の奥）に、後ろへ残す優先の2人の位置
+        const dir = dirOf(m.N, 0);
+        if (m.F[F_B] * dir > 15) { for (let i = 1; i < 11; i++) if (m.rest[i] >= 0 && m.rest[i] < 2) { o.sb += m.px[i] * dir; o.sbN++; } }
+      }
+    }
+  }
+  return { reg5: o.reg5 / Math.max(1, o.lost), cen: o.cen / Math.max(1, o.n3), near: o.near / Math.max(1, o.n3), prog: o.prog / Math.max(1, o.progN), sb: o.sb / Math.max(1, o.sbN), lost: o.lost };
+}
+await test('transition: 切り替え（失った直後・奪った直後）とリスクの指示が動きに効く', () => {
+  const b = transStats({}), gp = transStats({ onLose: 1 }), rt = transStats({ onLose: -1 }), v1 = transStats({ onWin: 1 }), v0 = transStats({ onWin: -1 }), rs = transStats({ risk: -1 });
+  const f = (x) => x.toFixed(2);
+  assert.ok(gp.reg5 > b.reg5 + 0.05, `すぐ奪い返す: 5秒以内に奪い返す割合 ${f(gp.reg5)}（標準 ${f(b.reg5)}）`);
+  assert.ok(gp.near > b.near + 0.25, `すぐ奪い返す: 3秒後にボール8m以内にいる人数 ${f(gp.near)}（標準 ${f(b.near)}）`);
+  assert.ok(rt.cen < b.cen - 2.5 && gp.cen > b.cen + 1, `敵陣で失って3秒後のチームの重心 すぐ戻る ${f(rt.cen)} 標準 ${f(b.cen)} すぐ奪い返す ${f(gp.cen)}（m）`);
+  assert.ok(v1.prog > b.prog + 1 && v0.prog < b.prog - 0.5, `奪った直後: 4秒後のボールの前進 縦に速く ${f(v1.prog)} 標準 ${f(b.prog)} キープ ${f(v0.prog)}（m）`);
+  assert.ok(rs.sb < b.sb - 4, `リスクが低い: 敵陣の奥で攻めているとき、後ろへ残す2人の位置 ${f(rs.sb)}（標準 ${f(b.sb)} m）`);
+  return `5秒奪回 ${f(gp.reg5)}/${f(b.reg5)}  3秒後の重心 ${f(rt.cen)}/${f(b.cen)}/${f(gp.cen)}  4秒前進 ${f(v1.prog)}/${f(b.prog)}/${f(v0.prog)}  残す位置 ${f(rs.sb)}/${f(b.sb)}`;
+});
+await test('transition: 切り替えの指示を0にすると窓が開かない（loseW/winW = 0、tacT なし）。指示があるとき窓の長さは最大 6 秒', () => {
+  const z = tacParams({ onLose: 0, onWin: 0, risk: 0 });
+  assert.equal(z.loseW, 0); assert.equal(z.winW, 0); assert.equal(z.tacT, null); assert.equal(z.restN, 0); assert.equal(z.tuckK, 1);
+  const a = tacParams({ onLose: 1, onWin: -1 });
+  assert.equal(a.loseW, 120); assert.equal(a.winW, 120); assert.equal(a.tacT.nPress, 3);
+  assert.equal(tacParams({ onLose: -1 }).loseW, 80);
+});
+
+// スタミナ
+await test('stamina: 万全で始まり、走ると減る。ハーフタイムで少し回復し、STMが高いほど減りにくい。控えは万全で出る', () => {
+  const m = mk(1);
+  for (let i = 0; i < NP; i++) assert.equal(m.F[F_STA + i], 1);
+  run(m, 20 * 1200);
+  const a20 = staminaOf(m, 0);
+  assert.ok(a20 < 0.97 && a20 > 0.5, `20分後 ${a20.toFixed(2)}`);
+  const h = mk(2);
+  run(h, h.pEnd[0] - 1);
+  const before = staminaOf(h, 1);
+  run(h, h.pEnd[0] + 2);
+  assert.ok(staminaOf(h, 1) > before + 0.1, `ハーフタイムの回復 ${before.toFixed(2)} → ${staminaOf(h, 1).toFixed(2)}`);
+  const inp = sampleInput(3, OPT);
+  for (const [k, st] of [[0, 20], [1, 1]]) inp.teams[k].players.forEach((p) => { const v = Array.from(abVec(p.ab)); v[AB.STM] = st; p.ab = v; });
+  const e = createMatch(inp);
+  run(e, 20 * 1200);
+  assert.ok(staminaOf(e, 0) > staminaOf(e, 1) + 0.05, `STM 20: ${staminaOf(e, 0).toFixed(2)} / STM 1: ${staminaOf(e, 1).toFixed(2)}`);
+  const sb = sampleInput(1, OPT);
+  sb.changes = [{ t: 600, k: 0, type: 'sub', slot: 9, bench: 2 }];
+  const s = createMatch(sb);
+  const ev = run(s, Infinity, { [EV.SUB]: true });
+  assert.ok(ev && ev[5] === 1);
+  assert.equal(s.F[F_STA + 9], 1, '控えは万全で出る');
+  assert.ok(s.F[F_STA + 8] < 1);
+  return `20分後 ${a20.toFixed(2)}、STM20 ${staminaOf(e, 0).toFixed(2)} / STM1 ${staminaOf(e, 1).toFixed(2)}`;
+});
+await test('stamina: 疲れるほど遅くなる（最高速度・加速度）。強く走り回るチームほど後半に疲れている', () => {
+  const m = mk(4);
+  const v0 = m.vmax[5];
+  assert.equal(v0, m.vmax0[5]);
+  run(m, 30 * 1200);
+  assert.ok(m.F[F_STA + 5] < 1 && m.vmax[5] < m.vmax0[5] && m.acc[5] < m.acc0[5]);
+  let a = 0, b = 0;
+  for (const seed of [1, 2, 3]) {
+    const s0 = createMatch(sampleInput(seed, OPT)), s1 = createMatch(sampleInput(seed, { ...OPT, homeTac: { onLose: 1, pressPower: 0.5 } }));
+    run(s0, 30 * 1200); run(s1, 30 * 1200);
+    a += staminaOf(s0, 0) / 3; b += staminaOf(s1, 0) / 3;
+  }
+  assert.ok(b < a - 0.05, `標準 ${a.toFixed(2)}、ゲーゲンプレス+強いプレス ${b.toFixed(2)}`);
+  return `30分後: 標準 ${a.toFixed(2)}、ゲーゲンプレス+強いプレス ${b.toFixed(2)}`;
 });
 
 // ── 決まりごとの検査 ──

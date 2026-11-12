@@ -1,7 +1,7 @@
 // 保持者の判断と実行（4層AIの「判断」と「実行」）。
 // 選択肢（シュート・パス・スペースへのパス・ドリブル・クリア）に点数をつけ、一番高いものを選ぶ。
 // 点数 = ボールを持つ価値(xt)の期待値。乱数は「見え方（点数の誤差）」と「蹴りの誤差」にだけ使う。
-import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP, dirOf } from './consts.js';
+import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP, PHASE, dirOf } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { normal4 } from './core/rng.js';
@@ -14,6 +14,7 @@ const KEEP = 0.008; // ボールを持ち続けること自体の価値（失う
 const K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
 // シュートの価値の倍率: 見込み(xG)が低いほど控えめ(SHOT_LO)、高いほど積極的(SHOT_HI)。撃てる位置ほど撃つ意識が強く、遠いシュートは控えめ
 const SHOT_LO = 0.3, SHOT_HI = 1.05, SHOT_X0 = 0.03, SHOT_XW = 0.07;
+const WIN_K = 0.5; // 奪った直後の窓での、前へ進める価値・リスクの重みの変え方（指示 ±1 で ±50%）
 const K_PRS = 0.5; // 行き先の圧力による価値の割引（圧力1.5で 1-1.5*K_PRS）。人でごった返すゴール前へ突っ込まない
 const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0.25 ? f : 0.25; };
 // 運ぶ（ドリブル）の候補: ゴールへ向かう向きを前として、前・斜め前・横・斜め後ろの7方向 × 近く(4.5m)と遠く(9m)
@@ -29,6 +30,13 @@ const HOLD0 = 1.5, HOLD_W = 0.006; // 持ち続けて HOLD0 秒を過ぎると�
 export function touchHazard(sp, press, dri, bal) {
   const r = sp * 0.125;
   return (0.02 + 0.10 * r * r) * (1 + 0.8 * (press > 1 ? 1 : press)) * (1.3 - 0.025 * dri - 0.005 * bal);
+}
+
+// 奪った直後の窓（指示 onWin。奪ってから winW tick の間）なら、その指示の値（-1〜+1）を返す。窓の外・指示なしは 0（標準）。
+// 縦に速く(+)は、リスクを取って前へ進める価値を上げ、キープ(-)は、失う危険を重く見て落ち着く。
+export function winMode(m, k) {
+  const c = m.tac[k];
+  return c.winW > 0 && m.N[I.PHASE] === PHASE.LIVE && m.N[I.POSS] === k && m.t - m.N[I.CHGT] < c.winW ? c.t.onWin : 0;
 }
 
 // 点 (x,y) の周りの、相手チームの圧力（6m以内の相手の近さの合計。最大1.5）
@@ -101,7 +109,8 @@ export function carryOptions(m, i, press, hold, cb) {
   const { px, py, vx, vy, team, ab, N } = m;
   const k = team[i], dir = dirOf(N, k), A = i * NAB, o0 = (1 - k) * 11;
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI];
-  const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
+  const wa = winMode(m, k), wv = 1 + WIN_K * wa; // 奪った直後: 前へ進める価値の倍率（wv）と、失う危険の重み（LOSS_W × (1 - WIN_K×wa)）
+  const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * (1 - WIN_K * wa) * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
   const held = (m.t - N[I.GOT]) * 0.05, tired = held > HOLD0 ? HOLD_W * (held - HOLD0) : 0; // 持ち続けた時間によるぶん
   for (let li = hold ? -1 : 0; li < 2; li++) {
     for (let u = 0; u < (li < 0 ? 1 : 7); u++) {
@@ -125,7 +134,7 @@ export function carryOptions(m, i, press, hold, cb) {
         keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
       }
       const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
-      const V = K_DRIB * (keep * (xt(dfx, dfy) * prsF(pd) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      const V = K_DRIB * (keep * (xt(dfx, dfy) * prsF(pd) * wv + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
   }
@@ -166,6 +175,7 @@ export function decide(m, i) {
   const vis = 10 + 2.5 * ab[A + AB.VIS]; // 見える範囲 (m)
   const pas = ab[A + AB.PAS], lng = gk ? ab[A + AB.GKD] : ab[A + AB.LNG];
   const pe = 1 + 0.5 * press * (1 - 0.03 * ab[A + AB.CMP]); // 圧力による蹴りの乱れ
+  const wa = winMode(m, k), wv = 1 + WIN_K * wa, lw = LOSS_W * (1 - WIN_K * wa); // 奪った直後の窓（標準は 0 で、倍率はすべて 1）
 
   let bV = -1e9, bt = 0, bj = -1, bdx = 0, bdy = 0, bpc = 0.5, bdist = 0, tag = 0;
   const consider = (V, type, j, dx, dy, pace, dist) => {
@@ -207,7 +217,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (xt(dfx, dfy) * prsF(pd) + KEEP) - (1 - p) * (LOSS_W * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
+    const V = K_PASS * (p * (xt(dfx, dfy) * prsF(pd) * wv + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {

@@ -19,6 +19,8 @@ engine/（試合エンジン・純粋JS）/ sim/（週進行など）/ data/ / u
 - 試合の状態は `F`・`N`・`log` だけ（AIの内部状態も）。`snapshot`/`restore` で完全に戻せること。
 - 結果が変わる修正は `ENGINE_VERSION` を上げ、`npm run golden` で基準値を更新する。
 - チーム指示（`data/tactics.js` の13項目、-1〜+1、0=標準）は `engine/tactic.js` で数値にして `m.tac[k]` から読む。指示を足すときは、0 のとき従来と同じ動きにする（golden が変わらないこと）。その場合 `ENGINE_VERSION` は上げない。
+- 体力は `F[F_STA+選手]`（1=万全）。能力から決まる本来の最高速度・加速度は `m.vmax0`/`m.acc0`、`m.vmax`/`m.acc` は疲れを反映した値（`engine/stamina.js` の `fatigue` が毎tick作り直す）。能力を差し替えるときは vmax0/acc0 側を変える。
+- 切り替えの指示（失った直後・奪った直後）は、ボールを持つチームが替わった tick（`N[I.CHGT]`）から数秒の「窓」の間だけ効く。窓は takeControl のときだけ開く（再開・キックオフでは開かない）。
 - engine/ から render/・ui/・tools/・sim/ を import しない。
 
 ## テスト

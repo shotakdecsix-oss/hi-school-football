@@ -32,24 +32,24 @@ export function latM(ap, dfx, dfy) {
 
 // 点 (fx,fy)（攻める向きを+にした座標）から撃ったときの見込み（得点の確率の目安）。
 // 位置の見込み(xG) × シュート能力の補正 shtF × コースに立つ相手（GK以外）× 圧力
-function shotQ(m, k, dir, fx, fy, press, shtF) {
+function shotQ(m, k, dir, fx, fy, press, shtF, aw) { // aw: 認知（見えていない相手は、コースに立っていても気づかない）。省略は全員が見えている
   const { px, py } = m, o0 = (1 - k) * 11, dgx = HL - fx;
   let block = 1;
   for (let q = o0 + 1; q < o0 + 11; q++) {
     const qf = px[q] * dir, qy = py[q] * dir;
     if (qf > fx && qf < HL) {
       const ly = fy * (1 - (qf - fx) / dgx);
-      if (Math.abs(qy - ly) < 2.2) block *= BLK;
+      if (Math.abs(qy - ly) < 2.2) block *= aw ? 1 - (1 - BLK) * aw[q] : BLK;
     }
   }
   return xgAt(dgx, fy) * block * shtF * (1 - PRS_S * press);
 }
 
 // ゴール前の「ボールを持つ価値」v（xt から作った値）に、そこで撃てる見込みの CONT 倍を上限にかける。遠い所は v のまま。
-function zoneCap(m, k, dir, dfx, dfy, pd, v, shtF) {
+function zoneCap(m, k, dir, dfx, dfy, pd, v, shtF, aw) {
   const dgx = HL - dfx;
   if (dgx >= ZN) return v;
-  const cap = CONT * shotQ(m, k, dir, dfx, dfy, pd, shtF);
+  const cap = CONT * shotQ(m, k, dir, dfx, dfy, pd, shtF, aw);
   if (cap >= v) return v;
   return v + (dgx <= ZN - ZW ? 1 : (ZN - dgx) / ZW) * (cap - v);
 }
@@ -173,7 +173,7 @@ export function carryOptions(m, i, press, hold, cb, aw) { // aw: 認知（見え
       // 今の勢いを続ける価値。認知ありのときは体の向きで見る（止まっていても、向いている方へ運ぶほうが楽。背を向けていると、前へ運ぶには向きを変える手間がかかる）
       const mom = m.pOn ? MOM * (0.4 + 0.6 * (sp > 5 ? 1 : sp / 5)) * (dist > 0.1 ? (m.fcx[i] * ex + m.fcy[i] * ey) / dist : -1)
         : sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
-      const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), shtF) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), shtF, aw) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
   }
@@ -210,7 +210,7 @@ export function decide(m, i) {
   const k = team[i], dir = dirOf(N, k), A = i * NAB, gk = slot[i] === 0, j0 = k * 11, o0 = (1 - k) * 11;
   const sp = N[I.SETP]; // 再開（スローイン・ゴールキック・コーナー）の最初のプレーか。蹴るだけで、運ぶ・撃つ・クリアはしない
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir;
-  const aw = m.pOn ? seeAll(m, i) : null; // 認知: 自分から見て、周りの選手がどれだけ見えているか（オフなら全員が見えている）
+  const aw = m.pOn ? seeAll(m, i, sp !== SP.NONE) : null; // 認知: 自分から見て、周りの選手がどれだけ分かっているか（オフなら全員が分かっている）。再開の最初のプレーは、周りを見渡せる
   const press = pressureAt(m, x, y, k), line = offsideLine(m, k);
   const sig = 0.04 + 0.008 * (20 - (ab[A + AB.DEC] + ab[A + AB.VIS]) / 2); // 見え方の誤差（点数に対する割合）
   const vis = 10 + 2.5 * ab[A + AB.VIS]; // 見える範囲 (m)
@@ -258,7 +258,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT]) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - ap.passCost;
+    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT], aw) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - ap.passCost;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
@@ -277,7 +277,7 @@ export function decide(m, i) {
     const dgx = HL - fx;
     if (dgx > 0.3 && dgx < 32) {
       const shtF = 0.4 + 0.06 * ab[A + AB.SHT], raw = xgAt(dgx, fy) * shtF; // raw = 位置と能力だけの見込み
-      const xg0 = shotQ(m, k, dir, fx, fy, press, shtF); // 相手・圧力を織り込んだ見込み
+      const xg0 = shotQ(m, k, dir, fx, fy, aw ? pressureAt(m, x, y, k, aw) : press, shtF, aw); // 相手・圧力を織り込んだ見込み
       const xg = xg0 * (SHOT_LO + (SHOT_HI - SHOT_LO) * clamp((raw - SHOT_X0) / SHOT_XW, 0, 1));
       consider(xg * ap.shtK + 0.004, 1, -1, HL * dir, 0); // shtK: 指示 リスク（冒険するほど撃つ。標準 1）
     }

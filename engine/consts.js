@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 12; // 12: 認知（向き・視野・気づき）を既定にした（入力 percept: 0 で従来の「全員が全部見えている」動きに戻せる）
+export const ENGINE_VERSION = 13; // 13: 認知を見直した（パスの候補は扇の中・近くの気配・直前に見た味方だけ。保持者の扇は狭い。気づいていない相手のタックルは決まりやすい。シュートの見積もりも見えている相手だけ）
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -75,6 +75,10 @@ export const I = {
 export const ST_N = 15;
 export const ST = { PASS: 0, PASSOK: 1, SOT: 2, SAVE: 3, TKL: 4, TKLW: 5, ICPT: 6, MISC: 7, DRIB: 8, LOB: 9, CLR: 10, HEAVY: 11, THROW: 12, GKICK: 13, CORNER: 14 };
 export const N_LEN = I.ST + 2 * ST_N;
+// 認知: 味方を最後に視野ではっきり見た tick（観測者 i × 味方 j。N[N_LS + i*NP + j]。同じチームの組だけ使う）。入力 percept が 0 でないときだけ、N の後ろに確保する
+export const N_LS = N_LEN;
+export const N_LEN_P = N_LS + NP * NP;
+export const NEVER_SEEN = -1000000;
 export const PHASE = { LIVE: 0, PAUSE: 1, END: 2, PK: 3 };
 export const NEXT = { KICKOFF: 0, RESTART: 1 };
 // 再開の種類。止まっている間（PAUSE）に、蹴る選手がボールの位置へ向かい、相手は離れる。待ち時間は種類ごと（tick）

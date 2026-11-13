@@ -12,7 +12,9 @@ import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
-import { lagOf } from './percept.js';
+import { lagOf, blindOf } from './percept.js';
+
+const BLIND = 3.5; // 認知: 気づいていない相手のタックルは、能力の差にこれだけ（能力の点数で）上乗せされる
 
 // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）は、指示（ライン高さ）から決まる m.tac[k].floorD（標準 13）。6ヤードボックスに張り付いて壁になるのを防ぐ
 const SB_UP = 15, SB_TUCK = 0.35; // SBの攻撃参加: ボール側で上がる量(m)・逆サイドで絞る割合（ボールが敵陣深くのとき最大）
@@ -476,11 +478,18 @@ export function takerReady(m) {
 // スローイン2m・コーナー9.15m（少し余裕を見て 2.2 / 9.4）、ゴールキックはペナルティエリアの外。
 export function keepOut(sp, x, y, rx, ry) {
   if (sp === SP.THROW || sp === SP.CORNER) {
-    const R = sp === SP.CORNER ? 9.4 : 2.2, dx = x - rx, dy = y - ry, d2 = dx * dx + dy * dy;
+    // 押し出すのは、ピッチの内側（と横）へだけ。ライン側へはみ出している選手は、先にラインの上へ寄せてから数える（外へ押し出さない）
+    const R = sp === SP.CORNER ? 9.4 : 2.2, sx = rx > 0 ? 1 : -1, sy = ry > 0 ? 1 : -1;
+    let dx = clamp(x, -HL, HL) - rx, dy = clamp(y, -HW, HW) - ry;
+    if (dy * sy > 0) dy = 0;
+    if (sp === SP.CORNER && dx * sx > 0) dx = 0;
+    const d2 = dx * dx + dy * dy;
     if (d2 >= R * R) return null;
-    if (d2 < 1e-6) return [rx - (rx > 0 ? R : -R), ry];
+    if (d2 < 1e-6) return [clamp(rx - sx * R, -HL, HL), ry];
     const d = Math.sqrt(d2);
-    return [rx + (dx / d) * R, ry + (dy / d) * R];
+    let ox = rx + (dx / d) * R, oy = ry + (dy / d) * R;
+    if (ox > HL || ox < -HL) { ox = clamp(ox, -HL, HL); const h = Math.sqrt(Math.max(0, R * R - (ox - rx) * (ox - rx))); oy = ry + (dy >= 0 ? h : -h); } // ゴールライン際のスローイン: ラインに沿って R の距離へ
+    return [ox, clamp(oy, -HW, HW)];
   }
   if (sp === SP.GKICK) {
     const sx = rx > 0 ? 1 : -1;
@@ -666,7 +675,7 @@ function tackles(m, o) {
   const rx = px[o] - px[j], ry = py[o] - py[j], dd = Math.sqrt(rx * rx + ry * ry);
   const cs = dd > 0.01 ? ((vx[j] - vx[o]) * rx + (vy[j] - vy[o]) * ry) / dd : 0; // 寄せる速さ
   const qd = 0.6 * ab[B + AB.TCK] + 0.3 * ab[B + AB.AGG] + 0.4 * clamp(cs, 0, 5);
-  const qc = 0.6 * ab[A + AB.DRI] + 0.25 * ab[A + AB.BAL] + 0.15 * ab[A + AB.STR];
+  const qc = 0.6 * ab[A + AB.DRI] + 0.25 * ab[A + AB.BAL] + 0.15 * ab[A + AB.STR] - (m.pOn ? BLIND * blindOf(m, o, j) : 0); // 認知: 見えていない側から寄せられると、ボールを守れない
   if (f4(seed, t, j, 66) >= (0.05 + 0.004 * ab[B + AB.AGG]) * tcOf(m, kj).tklK) return; // 間合いに入っても、毎tick足を出すわけではない（プレス強度が高いほど出しやすい）
   const mg = qd - qc + 2.2 * normal4(seed, t, j, 64) - 0.5;
   N[I.ST + kj * ST_N + ST.TKL]++;

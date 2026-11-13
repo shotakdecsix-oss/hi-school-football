@@ -10,9 +10,9 @@ import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, BALL_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, NEVER_SEEN, BALL_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
 import { decide } from '../engine/decide.js';
-import { seeAt, seeAll, lagOf, look, refreshFace } from '../engine/percept.js';
+import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
@@ -347,10 +347,12 @@ await test('sub: 時刻のあとの最初の中断で交代し、控えの能力
   const before = Array.from(m.ab.subarray(9 * NAB, 10 * NAB));
   run(m, 3 * MIN - 1);
   assert.equal(subLog(m).length, 0, '時刻の前には交代しない');
-  run(m, 6 * MIN);
-  const L = subLog(m);
+  // 中断の間隔は展開しだい（数分あくこともある）なので、固定の分数では測らず、中断の始まりを拾って「最初の中断」と照らす
+  const pauses = []; let prev = m.N[I.PHASE];
+  while (m.t < SUBR.half * MIN && m.N[I.PHASE] !== PHASE.END) { stepMatch(m); const ph = m.N[I.PHASE]; if (ph === PHASE.PAUSE && prev !== PHASE.PAUSE) pauses.push(m.t); prev = ph; }
+  const L = subLog(m), first = pauses.find((t) => t >= 3 * MIN);
   assert.equal(L.length, 1);
-  assert.ok(L[0][0] >= 3 * MIN && L[0][0] < 6 * MIN, '数分のうちの中断で行われる');
+  assert.ok(first !== undefined && Math.abs(L[0][0] - first) <= 2, `時刻のあとの最初の中断（t=${first}）で行われる（実行 t=${L[0][0]}）`);
   assert.deepEqual(L[0].slice(2), [0, 9, 2, 1]);
   const bench = Array.from(abVec(input.teams[0].bench[2].ab));
   assert.deepEqual(Array.from(m.ab.subarray(9 * NAB, 10 * NAB)), bench);
@@ -538,7 +540,8 @@ await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク�
   assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
   assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
   assert.ok(W1.hs > b.hs + 0.01, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`); // 30試合で測ると +4〜5pt（認知なしは +6pt）。10試合ではばらつくので、向きだけ見る
-  assert.ok(T1.hold < b.hold - 0.2 && T0.pass < b.pass * 0.92, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b.pass)}（10分あたり）`);
+  // テンポ: 40試合で測ると、持ち時間 -0.39 秒（速）、パス本数 速 +27%・遅 -11%。10試合では遅の差が -6〜-15% とぶれるので、向きと下限（-5%）だけ見る
+  assert.ok(T1.hold < b.hold - 0.2 && T0.pass < b.pass * 0.95, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b.pass)}（10分あたり）`);
   assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
   assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
   assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.4, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
@@ -700,14 +703,16 @@ await test('percept: 視野（正面は見え、背後は見えない・広さ�
     const c = M.cos(100 * M.PI / 180), sn = M.sin(100 * M.PI / 180);
     assert.equal(at(i, 10 * c, 10 * sn) === 1, wide, `斜め後ろ 100° の 10m: 視野${wide ? 20 : 1} → ${at(i, 10 * c, 10 * sn).toFixed(2)}`);
     face(i, 0, 0.5);
-    assert.equal(at(i, -10, 0), 0.5, '気づき 0.5 なら、見えていない範囲も 5 割は分かっている');
+    assert.equal(senseAt(m, i, m.px[i] - 10, m.py[i]), 0.5, '気づき 0.5 なら、見えていない範囲も 5 割は把握している（相手の位置の把握に使う）');
+    assert.equal(at(i, -10, 0), 0, '首を振って確認しても、見えたことにはならない（パスの候補には入らない）');
   }
-  // seeAll: 見えていない味方は 0（出せない）、見えていない相手は 0.4（気配・チームの動きから）、自分は 1
+  // seeAll: 見えていない味方は（見たことがなければ）0（出せない）、見えていない相手は 0.4（気配・チームの動きから）、自分は 1
   put(5, 0, 0); face(5, 0, 0);
   put(4, -20, 0); put(15, -20, 5); put(3, 20, 0); put(14, 20, 5);
   for (let j = 0; j < NP; j++) if (![5, 4, 15, 3, 14].includes(j)) put(j, -45, 30 - 2 * j);
+  m.N.fill(NEVER_SEEN, N_LS); // キックオフで全員が覚えている状態を消す
   const aw = seeAll(m, 5);
-  assert.equal(aw[5], 1); assert.equal(aw[4], 0, '見えていない味方'); assert.ok(Math.abs(aw[15] - 0.4) < 1e-9, `見えていない相手 ${aw[15]}`);
+  assert.equal(aw[5], 1); assert.equal(aw[4], 0, '見えていない味方（見たことがない）'); assert.ok(Math.abs(aw[15] - 0.4) < 1e-9, `見えていない相手 ${aw[15]}`);
   assert.equal(aw[3], 1); assert.equal(aw[14], 1);
   // 見えていない相手に気づくまでの遅れ（予測の高い選手ほど短い）。見えていれば 0
   assert.ok(lagOf(m, 5, 15) > 0.45 && lagOf(m, 5, 15) <= 0.5, `予測1の遅れ ${lagOf(m, 5, 15).toFixed(2)}`);
@@ -715,6 +720,85 @@ await test('percept: 視野（正面は見え、背後は見えない・広さ�
   put(16, 0, 0); face(16, 0, 0); put(4, -20, 0);
   assert.ok(lagOf(m, 16, 4) < 0.25 && lagOf(m, 16, 4) >= 0.15, `予測20の遅れ ${lagOf(m, 16, 4).toFixed(2)}`);
   assert.ok(m.fov[16] > m.fov[5] + 0.8, `視野の半角 視野20 ${(m.fov[16] * 57.3).toFixed(0)}° / 視野1 ${(m.fov[5] * 57.3).toFixed(0)}°`);
+});
+await test('percept: ボールを持っている選手は扇が狭い（すぐそばの気配は同じ）。気配で分かる距離は、味方 10m・相手 6m', () => {
+  const inp = sampleInput(2, OPT);
+  inp.teams[0].players.forEach((p) => { const v = Array.from(abVec(p.ab)); v[AB.VIS] = 10; p.ab = v; });
+  const m = createMatch(inp);
+  for (let i = 0; i < NP; i++) { m.px[i] = -45; m.py[i] = 30 - 2 * i; m.vx[i] = m.vy[i] = 0; }
+  m.px[5] = 0; m.py[5] = 0; m.F[F_FACE + 5] = 0; m.F[F_SCN + 5] = 0; refreshFace(m);
+  const ang = (deg, d) => [d * M.cos(deg * M.PI / 180), d * M.sin(deg * M.PI / 180)];
+  const see = (deg, d) => { const [x, y] = ang(deg, d); return seeAt(m, 5, x, y); };
+  m.N[I.OWN] = 15; // 5 はボールを持っていない
+  const free = { a40: see(40, 10), a80: see(80, 10), a100: see(100, 10), back3: see(180, 3), fov: fovOf(m, 5) };
+  m.N[I.OWN] = 5; // 5 がボールを持つ
+  const held = { a40: see(40, 10), a80: see(80, 10), a100: see(100, 10), back3: see(180, 3), fov: fovOf(m, 5) };
+  assert.equal(free.a40, 1); assert.equal(held.a40, 1, '正面寄り（40°）はどちらも見える');
+  assert.ok(free.a80 > held.a80 + 0.5, `斜め 80°: 持っていない ${free.a80.toFixed(2)} / 持っている ${held.a80.toFixed(2)}`);
+  assert.ok(free.a100 > 0.1 && held.a100 === 0, `斜め後ろ 100°: 持っていない ${free.a100.toFixed(2)} / 持っている ${held.a100.toFixed(2)}`);
+  assert.equal(held.back3, free.back3, 'すぐそばの気配は、持っていても変わらない');
+  assert.ok(held.fov < free.fov * 0.85 && held.fov > free.fov * 0.7, `視野の半角 持っていない ${(free.fov * 57.3).toFixed(0)}° / 持っている ${(held.fov * 57.3).toFixed(0)}°`);
+  assert.equal(held.fov, m.fov[5] * 0.8, '保持者の扇は 0.8 倍');
+  // 気配で分かる距離: 味方は 10m まで（8m 後ろの味方がパスの候補になれる）、相手は 6m まで。見たことのない味方で調べる
+  m.N.fill(NEVER_SEEN, N_LS);
+  m.N[I.OWN] = 15;
+  m.px[4] = -8; m.py[4] = 0; m.px[3] = -11; m.py[3] = 0; m.px[14] = -8; m.py[14] = 3; m.px[13] = -3; m.py[13] = -1;
+  const aw = seeAll(m, 5);
+  assert.ok(aw[4] > 0.15 && aw[4] < 0.4, `8m 後ろの味方 ${aw[4].toFixed(2)}`);
+  assert.equal(aw[3], 0, '11m 後ろの味方（見たことがない）は分からない');
+  assert.ok(Math.abs(aw[14] - 0.4) < 1e-9, `8m 後ろの相手は気配の外（下限 0.4） ${aw[14].toFixed(2)}`);
+  assert.ok(aw[13] > 0.7, `3.2m 後ろの相手は気配の中 ${aw[13].toFixed(2)}`);
+  return `扇の半角 ${(free.fov * 57.3).toFixed(0)}° → 保持者 ${(held.fov * 57.3).toFixed(0)}°（斜め 80° の見え方 ${free.a80.toFixed(2)} → ${held.a80.toFixed(2)}）`;
+});
+await test('percept: 視野で見た味方は少しのあいだ覚えている（気づきが高いほど長く）。再開の最初のプレーは全員が分かる。視野に入れれば覚え直す', () => {
+  const m = mk(2);
+  for (let i = 0; i < NP; i++) { m.px[i] = -45; m.py[i] = 30 - 2 * i; m.vx[i] = m.vy[i] = 0; }
+  m.px[5] = 0; m.py[5] = 0; m.px[4] = -20; m.py[4] = 0; // 4 は 5 の背後
+  m.t = 2000; m.F[F_FACE + 5] = 0; refreshFace(m); m.N.fill(NEVER_SEEN, N_LS);
+  const mem = (scn, ticks) => { m.F[F_SCN + 5] = scn; m.N[N_LS + 5 * NP + 4] = m.t - ticks; return memOf(m, 5, 4); };
+  // 覚えていられる長さ = 3 秒 ×（0.3 + 0.7 × 気づき）。気づき 0 で 0.9 秒、1 で 3 秒
+  assert.equal(mem(0, 0), 1);
+  assert.ok(Math.abs(mem(0, 9) - 0.5) < 1e-9 && mem(0, 18) === 0 && mem(0, 100) === 0, '気づき 0: 0.9 秒で消える');
+  assert.ok(Math.abs(mem(1, 30) - 0.5) < 1e-9 && mem(1, 60) === 0, '気づき 1: 3 秒で消える');
+  assert.ok(mem(1, 20) > mem(0, 9), '気づきが高いほど長く覚えている');
+  assert.equal(memOf(m, 5, 4) >= 0, true);
+  // 覚えている味方はパスの候補になれる（見えていなくても）。見たことがない味方は候補にならない
+  m.F[F_SCN + 5] = 0; m.N[N_LS + 5 * NP + 4] = m.t - 9;
+  const a1 = seeAll(m, 5)[4];
+  assert.ok(Math.abs(a1 - 0.5) < 1e-9, `0.45 秒前に見た味方 ${a1}`);
+  m.N[N_LS + 5 * NP + 4] = NEVER_SEEN;
+  assert.equal(seeAll(m, 5)[4], 0, '見たことがない');
+  // 再開（キックオフ・セットプレー）の最初のプレーは、見渡す時間があるので味方の全員が分かる。相手は変わらない
+  const awF = seeAll(m, 5, true);
+  assert.equal(awF[4], 1, '見ていない味方も分かっている'); assert.equal(awF[3], 1);
+  assert.ok(awF[15] < 1, '相手は見渡しても全員は分からない');
+  // キックオフでは、味方の全員を覚えた状態で始まる（相手のチームの選手のことは覚えない）
+  const k = mk(3);
+  assert.equal(memOf(k, 5, 4), 1, 'キックオフ直後の味方'); assert.equal(k.N[N_LS + 5 * NP + 15], NEVER_SEEN, '相手は覚えるものではない');
+  // 視野に入れたら、その tick を覚え直す（look が更新する）
+  m.px[4] = 15; m.py[4] = 0; m.vx[5] = m.vy[5] = 0; m.N[I.OWN] = 15;
+  look(m);
+  assert.equal(m.N[N_LS + 5 * NP + 4], m.t, '視野に入っている味方は、見た時刻が更新される');
+  m.px[4] = -30; m.t += 20;
+  look(m);
+  assert.equal(m.N[N_LS + 5 * NP + 4], m.t - 20, '視野から外れたら更新されない');
+});
+await test('percept: ボールを持っている選手は、見えていない側（扇の外）から寄せられると、ボールを守れない（首を振って確認していれば備えられる）', () => {
+  const m = mk(2);
+  for (let i = 0; i < NP; i++) { m.px[i] = -45; m.py[i] = 30 - 2 * i; m.vx[i] = m.vy[i] = 0; }
+  m.px[9] = 0; m.py[9] = 0; m.F[F_FACE + 9] = 0; m.F[F_SCN + 9] = 0; refreshFace(m); m.N[I.OWN] = 9;
+  const put = (j, x, y) => { m.px[j] = x; m.py[j] = y; };
+  put(15, 3, 0); put(16, -3, 0); put(17, 1.5, -2); // 正面・真後ろ・ほぼ正面の斜め
+  assert.equal(blindOf(m, 9, 15), 0, '正面から寄せる相手は見えている');
+  assert.equal(blindOf(m, 9, 16), 1, '真後ろから寄せる相手は気づいていない');
+  assert.ok(blindOf(m, 9, 17) < 0.05);
+  m.F[F_SCN + 9] = 0.6;
+  assert.ok(Math.abs(blindOf(m, 9, 16) - 0.4) < 1e-9, '首を振って確認していれば（気づき 0.6）、備えられる分だけ軽くなる');
+  m.F[F_SCN + 9] = 1;
+  assert.equal(blindOf(m, 9, 16), 0, '気づき 1 なら、背後も分かっている');
+  // 認知なしでは、この影響はない
+  const o = createMatch(sampleInput(2, { ...OPT, percept: 0 }));
+  assert.equal(o.pOn, 0);
 });
 await test('percept: 気づきは、自由な選手ほど高く、ボールを持って寄せられている選手・ボールの近くで守る選手ほど低い', () => {
   const run1 = (setup) => { // 22 人を遠くに離して置き、場面だけ作って 15 秒ぶん気づきを更新する（動かさない）
@@ -749,14 +833,15 @@ await test('percept: ボールを持った選手は、視野の外（気づき�
   return `視野の外の味方へのパス ${blind}/${N}、見えている味方へのパス ${seen}/${N}`;
 });
 await test('percept: 認知ありは、見えていない味方へ出せないぶん、認知なしよりパスが減る', () => {
+  // 24試合で測ると -12%（1試合ごとの比は ±12% ぶれるので、12試合で見る）
   let on = 0, off = 0;
-  for (const seed of [1, 2, 3, 4]) {
+  for (let seed = 1; seed <= 12; seed++) {
     const a = createMatch(sampleInput(seed, OPT)), b = createMatch(sampleInput(seed, { ...OPT, percept: 0 }));
     run(a, 24000); run(b, 24000);
     on += a.N[I.ST + ST.PASS]; off += b.N[I.ST + ST.PASS];
   }
   assert.ok(on < off * 0.95, `パス数 認知あり ${on} / 認知なし ${off}`);
-  return `20分×4試合のパス数 認知あり ${on} / 認知なし ${off}（${Math.round(100 * (on / off - 1))}%）`;
+  return `20分×12試合のパス数 認知あり ${on} / 認知なし ${off}（${Math.round(100 * (on / off - 1))}%）`;
 });
 
 // ── 決まりごとの検査 ──

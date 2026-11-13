@@ -45,7 +45,8 @@ export function actorsSvg(f, roles = false, opt = {}) {
     }
     if (view === 1 && sb >= 0) { // すぐそば（気配で分かる範囲）の輪と、視点の選手の印
       const x = f.xy[2 * sb].toFixed(2), y = f.xy[2 * sb + 1].toFixed(2);
-      s += `<circle cx="${x}" cy="${y}" r="6" fill="none" stroke="#ffe600" stroke-width="0.12" stroke-dasharray="0.6 0.6" opacity="0.5"/>`
+      s += `<circle cx="${x}" cy="${y}" r="6" fill="none" stroke="#ffe600" stroke-width="0.12" stroke-dasharray="0.6 0.6" opacity="0.5"/>` // 相手の気配が分かる範囲
+        + `<circle cx="${x}" cy="${y}" r="10" fill="none" stroke="#7ec8ff" stroke-width="0.12" stroke-dasharray="0.6 0.6" opacity="0.5"/>` // 味方の気配が分かる範囲
         + (f.own === sb ? '' : `<circle cx="${x}" cy="${y}" r="1.7" fill="none" stroke="#ffe600" stroke-width="0.25" stroke-dasharray="0.5 0.4"/>`);
     }
   }
@@ -53,7 +54,10 @@ export function actorsSvg(f, roles = false, opt = {}) {
     const x = f.xy[2 * i].toFixed(2), y = f.xy[2 * i + 1].toFixed(2), gk = i % 11 === 0;
     const rc = roles && f.act ? ROLE_COL[f.act[i]] || '#fff' : gk ? '#ffd60a' : '#fff';
     if (f.own === i) s += `<circle cx="${x}" cy="${y}" r="2" fill="none" stroke="#ffe600" stroke-width="0.35" opacity="0.9"/>`;
-    const dim = view === 1 && f.see && i !== sb ? 0.3 + 0.7 * f.see[i] : 1; // 視点の選手に見えていない選手は薄く
+    const dim = view === 1 && f.see && i !== sb ? 0.25 + 0.75 * f.see[i] : 1; // 視点の選手に分かっていない選手は薄く
+    if (view === 1 && f.see && f.vis && sb >= 0 && i !== sb && (i < 11) === (sb < 11) && f.vis[i] < 0.5 && f.see[i] >= 0.25) { // いま視野の外だが、直前に見て覚えている味方
+      s += `<circle cx="${x}" cy="${y}" r="2.4" fill="none" stroke="#ffe600" stroke-width="0.22" stroke-dasharray="0.35 0.35" opacity="0.9"/>`;
+    }
     s += `<g opacity="${dim.toFixed(2)}"><circle cx="${x}" cy="${y}" r="1" fill="${COL[i < 11 ? 0 : 1]}" stroke="${rc}" stroke-width="${roles ? 0.4 : 0.2}"/>`
       + `<text x="${x}" y="${y}" dy="0.5" font-size="1.3" fill="#fff" text-anchor="middle" font-family="sans-serif">${(i % 11) + 1}</text>`;
     if (view) { // 体の向き（円の縁から出る短い線）
@@ -83,5 +87,5 @@ export function lerpFrame(a, b, u) {
     const T = 2 * Math.PI;
     for (let i = 0; i < face.length; i++) { const d = b.face[i] - a.face[i]; face[i] = a.face[i] + (d - T * Math.round(d / T)) * u; }
   }
-  return { t: b.t, xy, ball, score: b.score, phase: b.phase, half: b.half, own: b.own, act: b.act, face, fov: b.fov, scn: b.scn, see: b.see, seeBy: b.seeBy };
+  return { t: b.t, xy, ball, score: b.score, phase: b.phase, half: b.half, own: b.own, act: b.act, face, fov: b.fov, scn: b.scn, see: b.see, vis: b.vis, seeBy: b.seeBy };
 }

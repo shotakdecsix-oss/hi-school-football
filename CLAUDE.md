@@ -19,6 +19,8 @@ engine/（試合エンジン・純粋JS）/ sim/（週進行など）/ data/ / u
 - 試合の状態は `F`・`N`・`log` だけ（AIの内部状態も）。`snapshot`/`restore` で完全に戻せること。
 - 結果が変わる修正は `ENGINE_VERSION` を上げ、`npm run golden` で基準値を更新する。
 - チーム指示（`data/tactics.js` の13項目、-1〜+1、0=標準）は `engine/tactic.js` で数値にして `m.tac[k]` から読む。指示を足すときは、0 のとき従来と同じ動きにする（golden が変わらないこと）。その場合 `ENGINE_VERSION` は上げない。
+- 能力の効き（v15）: エンジンが使うのは能力そのものではなく実効値 `effVec`（`engine/abil.js`。基準値 + `AB_G`(0.26)×(能力−基準値)）。`setPlayerAb` で1回だけ掛ける。基準値は外野手の能力が 10、GK 専用の5能力は標準のGK（`GK_ANCHOR`）。全能力が一律に差1・3・5 違うと勝ち点率が約 61・85・93%（目標は現実のElo・1点≒90Eloの仮定で 63・83・93%。得点比の対数 0.30・1.30・1.90）。能力の差を使う試験・計測は `effVec`（`abVec` は生の値）。1人だけ・一部の能力だけの効きも同じ比で小さい（役割ごとの能力のコントラストも約1/4）。
+- パスの見込み（decide.js）: 受け手のファーストタッチは、決めた時の圧力 pd ではなく到着時の圧力 `PA0 + PA1×pd`（0.5 + 0.52pd）で見積もる（実測: パスの飛行中に相手が寄る・見えていない相手がいる）。
 - 体力は `F[F_STA+選手]`（1=万全）。能力から決まる本来の最高速度・加速度は `m.vmax0`/`m.acc0`、`m.vmax`/`m.acc` は疲れを反映した値（`engine/stamina.js` の `fatigue` が毎tick作り直す）。能力を差し替えるときは vmax0/acc0 側を変える。
 - 組み立て（`build`。-1 つなぐ〜+1 蹴る）は decide.js のパス・クリアの価値に効く（`atkParams` の `longPen/longBon/shortB/backB/clrK/clrLoss/gkFx/reliefK`。0 で従来と同じ）。型（標準・保持・直接）は `data/styles.js`、型ごとの狙いの数字と測定は `tools/style.js`（`npm run style`。90分×48試合×3種で約5分。型を変えたら外れた項目が無いか見る）。
 - 切り替えの指示（失った直後・奪った直後）は、ボールを持つチームが替わった tick（`N[I.CHGT]`）から数秒の「窓」の間だけ効く。窓は takeControl のときだけ開く（再開・キックオフでは開かない）。

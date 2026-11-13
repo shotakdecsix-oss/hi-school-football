@@ -11,7 +11,7 @@ import { markTouch, goalCredit } from '../engine/touchlog.js';
 import { selfCheck } from '../engine/selfcheck.js';
 import { Digest } from '../engine/core/digest.js';
 import { startPK, pkDecided } from '../engine/pk.js';
-import { AB, NAB, abVec } from '../engine/abil.js';
+import { AB, NAB, abVec, effVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
 import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, N_LEN, NEVER_SEEN, BALL_R, PRED_N, PRED_TICKS, DT, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
@@ -346,7 +346,7 @@ const MIN = 1200; // 1分 = 1200 tick
 const mkS = (seed, changes, rules = SUBR) => createMatch(sampleInput(seed, { ...OPT, rules, changes }));
 const sub = (t, k, slot, bench) => ({ t, k, type: 'sub', slot, bench });
 const subLog = (m) => m.log.filter((e) => e[1] === EV.SUB);
-const abvec = (input, k, b) => Array.from(abVec(input.teams[k].bench[b].ab)); // 控え b の能力
+const abvec = (input, k, b) => Array.from(effVec(input.teams[k].bench[b].ab)); // 控え b の能力
 await test('sub: 時刻のあとの最初の中断で交代し、控えの能力に入れ替わる', () => {
   const m = mkS(4, [sub(3 * MIN, 0, 9, 2)]), input = m.input;
   const before = Array.from(m.ab.subarray(9 * NAB, 10 * NAB));
@@ -359,7 +359,7 @@ await test('sub: 時刻のあとの最初の中断で交代し、控えの能力
   assert.equal(L.length, 1);
   assert.ok(first !== undefined && Math.abs(L[0][0] - first) <= 2, `時刻のあとの最初の中断（t=${first}）で行われる（実行 t=${L[0][0]}）`);
   assert.deepEqual(L[0].slice(2), [0, 9, 2, 1]);
-  const bench = Array.from(abVec(input.teams[0].bench[2].ab));
+  const bench = Array.from(effVec(input.teams[0].bench[2].ab));
   assert.deepEqual(Array.from(m.ab.subarray(9 * NAB, 10 * NAB)), bench);
   assert.notDeepEqual(before, bench);
   assert.equal(m.vmax0[9], 5.8 + 0.22 * bench[AB.SPD]);
@@ -453,7 +453,7 @@ await test('tactics: 守備の指示が陣形に効く（ライン高さ・コ�
   assert.ok(cp.len < base.len - 4 && cp.wid < base.wid - 3, `コンパクト: 縦 ${f(cp.len)} 横 ${f(cp.wid)} (標準 縦 ${f(base.len)} 横 ${f(base.wid)})`);
   assert.ok(lp.wid > base.wid + 0.8, `間延び: 横 ${f(lp.wid)} (標準 ${f(base.wid)})`);
   assert.ok(base.press > 0.8 && wait.press < 0.1, `引いて待つ: 敵陣側にボールがあるときの寄せ役 ${f(wait.press)} 人 (標準 ${f(base.press)} 人)`);
-  assert.ok(pp.tkl > pm.tkl * 1.2, `プレス強度: タックル ${pp.tkl} 回（強） ${pm.tkl} 回（弱）`);
+  assert.ok(pp.tkl > pm.tkl * 1.1, `プレス強度: タックル ${pp.tkl} 回（強） ${pm.tkl} 回（弱）`); // v15: 能力の効きを寝かせたので、力の差（11 対 9）が小さくなり、強い圧の効きも小さい（30試合で 弱150・強180 回）
   return `最終ライン 高${f(hi.line)} 標準${f(base.line)} 低${f(lo.line)} m／縦幅 コンパクト${f(cp.len)} 標準${f(base.len)} m`;
 });
 
@@ -583,9 +583,9 @@ await test('tactics: 組み立て（build）— 0 は標準のまま。+1 でロ
   const S = [1, 2, 3, 4, 5, 6, 7, 8];
   const b = buildStats({}, S), h1 = buildStats({ build: -1 }, S), d1 = buildStats({ build: 1 }, S);
   const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
-  // 8試合×15分で測ると ロング 1.8/3.1/7.4（0.6倍・2.4倍）、クリア 10.4/14.9/17.1、後ろ向き 38%/32%/32%、パス 182/142/104。ばらつくので、向きと余裕のある下限だけ見る
+  // 40試合×15分で測ると（v15）ロング 1.7/3.4/6.8（0.5倍・2.0倍）、クリア 13.2/20.1/21.1（標準と蹴るの差は小さい。つなぐは0.66倍）、後ろ向き 41%/37%/36%、パス 153/99/81。ばらつくので、向きと余裕のある下限だけ見る
   assert.ok(h1.long < b.long * 0.8 && d1.long > b.long * 1.5, `ロング(25m超)のパス つなぐ${f(h1.long)} 標準${f(b.long)} 蹴る${f(d1.long)}`);
-  assert.ok(h1.clr < b.clr * 0.9 && d1.clr > b.clr, `クリア つなぐ${f(h1.clr)} 標準${f(b.clr)} 蹴る${f(d1.clr)}`);
+  assert.ok(h1.clr < b.clr * 0.9 && d1.clr > h1.clr * 1.3, `クリア つなぐ${f(h1.clr)} 標準${f(b.clr)} 蹴る${f(d1.clr)}`); // 標準と蹴るの差は小さい（+5%）ので、つなぐとの差で見る
   assert.ok(h1.back > b.back + 0.03, `後ろ向きのパスの割合 つなぐ${p(h1.back)} 標準${p(b.back)}`);
   assert.ok(h1.pass > b.pass * 1.15 && d1.pass < b.pass * 0.85, `パス本数 つなぐ${f(h1.pass)} 標準${f(b.pass)} 蹴る${f(d1.pass)}`);
   return `ロング ${f(h1.long)}/${f(b.long)}/${f(d1.long)}  クリア ${f(h1.clr)}/${f(b.clr)}/${f(d1.clr)}  後ろ向き ${p(h1.back)}/${p(b.back)}/${p(d1.back)}  パス ${f(h1.pass)}/${f(b.pass)}/${f(d1.pass)}（−1/0/+1。8試合の15分あたり）`;
@@ -628,11 +628,18 @@ await test('stamina: 万全で始まり、走ると減る。ハーフタイム�
   const before = staminaOf(h, 1);
   run(h, h.pEnd[0] + 2);
   assert.ok(staminaOf(h, 1) > before + 0.1, `ハーフタイムの回復 ${before.toFixed(2)} → ${staminaOf(h, 1).toFixed(2)}`);
-  const inp = sampleInput(3, OPT);
-  for (const [k, st] of [[0, 20], [1, 1]]) inp.teams[k].players.forEach((p) => { const v = Array.from(abVec(p.ab)); v[AB.STM] = st; p.ab = v; });
-  const e = createMatch(inp);
-  run(e, 20 * 1200);
-  assert.ok(staminaOf(e, 0) > staminaOf(e, 1) + 0.05, `STM 20: ${staminaOf(e, 0).toFixed(2)} / STM 1: ${staminaOf(e, 1).toFixed(2)}`);
+  // STM の効き: 同じ試合（種・相手・陣形）で、チーム0の全員の STM だけを 20 と 1 に替えて30分走らせ、チーム0の体力を比べる。
+  // 能力の効きを寝かせた実効値で、消耗の速さ（sdr）は STM 20 で 0.92 倍・STM 1 で 1.08 倍。30分では体力の差は 0.04 ほど（別のチームどうしだと陣形の違いに埋もれる）
+  const stm30 = (st) => {
+    const inp = sampleInput(3, OPT);
+    inp.teams[0].players.forEach((p) => { const v = Array.from(abVec(p.ab)); v[AB.STM] = st; p.ab = v; });
+    const e = createMatch(inp);
+    run(e, 30 * 1200);
+    return e;
+  };
+  const eh = stm30(20), el = stm30(1);
+  assert.ok(eh.sdr[5] < el.sdr[5] && eh.srec[5] > el.srec[5], '消耗はSTMが高いほど遅く、回復は速い');
+  assert.ok(staminaOf(eh, 0) > staminaOf(el, 0) + 0.01, `STM 20: ${staminaOf(eh, 0).toFixed(2)} / STM 1: ${staminaOf(el, 0).toFixed(2)}`);
   const sb = sampleInput(1, OPT);
   sb.changes = [{ t: 600, k: 0, type: 'sub', slot: 9, bench: 2 }];
   const s = createMatch(sb);
@@ -640,7 +647,7 @@ await test('stamina: 万全で始まり、走ると減る。ハーフタイム�
   assert.ok(ev && ev[5] === 1);
   assert.equal(s.F[F_STA + 9], 1, '控えは万全で出る');
   assert.ok(s.F[F_STA + 8] < 1);
-  return `20分後 ${a20.toFixed(2)}、STM20 ${staminaOf(e, 0).toFixed(2)} / STM1 ${staminaOf(e, 1).toFixed(2)}`;
+  return `20分後 ${a20.toFixed(2)}、30分後 STM20 ${staminaOf(eh, 0).toFixed(2)} / STM1 ${staminaOf(el, 0).toFixed(2)}`;
 });
 await test('stamina: 疲れるほど遅くなる（最高速度・加速度）。強く走り回るチームほど後半に疲れている', () => {
   const m = mk(4);
@@ -753,8 +760,15 @@ await test('percept: 視野（正面は見え、背後は見えない・広さ�
     const nz = at(i, -3, 0);
     assert.ok(nz > 0.3 && nz < 0.9, `背後 3m は少し分かる ${nz.toFixed(2)}`);
     assert.equal(at(i, -7, 0), 0, '背後 7m は分からない');
-    const c = M.cos(100 * M.PI / 180), sn = M.sin(100 * M.PI / 180);
-    assert.equal(at(i, 10 * c, 10 * sn) === 1, wide, `斜め後ろ 100° の 10m: 視野${wide ? 20 : 1} → ${at(i, 10 * c, 10 * sn).toFixed(2)}`);
+    // 視野の広さは、能力の効きを寝かせた実効値で決まる（視野20 → 実効12.3 → 113°、視野1 → 実効7.9 → 98°。端の 30° は弱く見える）
+    const aAt = (deg) => at(i, 10 * M.cos(deg * M.PI / 180), 10 * M.sin(deg * M.PI / 180));
+    if (wide) {
+      assert.equal(aAt(80), 1, '視野20: 斜め後ろ 80° の 10m ははっきり見える');
+      assert.ok(aAt(100) > 0 && aAt(100) < 1, `視野20: 100° は端で弱く見える ${aAt(100).toFixed(2)}`);
+    } else {
+      assert.ok(aAt(80) > 0 && aAt(80) < 1, `視野1: 80° は端で弱く見える ${aAt(80).toFixed(2)}`);
+      assert.equal(aAt(100), 0, '視野1: 100° は見えない');
+    }
     face(i, 0, 0.5);
     assert.equal(senseAt(m, i, m.px[i] - 10, m.py[i]), 0.5, '気づき 0.5 なら、見えていない範囲も 5 割は把握している（相手の位置の把握に使う）');
     assert.equal(at(i, -10, 0), 0, '首を振って確認しても、見えたことにはならない（パスの候補には入らない）');
@@ -768,11 +782,11 @@ await test('percept: 視野（正面は見え、背後は見えない・広さ�
   assert.equal(aw[5], 1); assert.equal(aw[4], 0, '見えていない味方（見たことがない）'); assert.ok(Math.abs(aw[15] - 0.4) < 1e-9, `見えていない相手 ${aw[15]}`);
   assert.equal(aw[3], 1); assert.equal(aw[14], 1);
   // 見えていない相手に気づくまでの遅れ（予測の高い選手ほど短い）。見えていれば 0
-  assert.ok(lagOf(m, 5, 15) > 0.45 && lagOf(m, 5, 15) <= 0.5, `予測1の遅れ ${lagOf(m, 5, 15).toFixed(2)}`);
+  assert.ok(lagOf(m, 5, 15) > 0.37 && lagOf(m, 5, 15) < 0.4, `予測1の遅れ ${lagOf(m, 5, 15).toFixed(2)}`);
   assert.equal(lagOf(m, 5, 14), 0);
   put(16, 0, 0); face(16, 0, 0); put(4, -20, 0);
-  assert.ok(lagOf(m, 16, 4) < 0.25 && lagOf(m, 16, 4) >= 0.15, `予測20の遅れ ${lagOf(m, 16, 4).toFixed(2)}`);
-  assert.ok(m.fov[16] > m.fov[5] + 0.8, `視野の半角 視野20 ${(m.fov[16] * 57.3).toFixed(0)}° / 視野1 ${(m.fov[5] * 57.3).toFixed(0)}°`);
+  assert.ok(lagOf(m, 16, 4) < lagOf(m, 5, 15) - 0.04 && lagOf(m, 16, 4) > 0.29, `予測20の遅れ ${lagOf(m, 16, 4).toFixed(2)}`);
+  assert.ok(m.fov[16] > m.fov[5] + 0.2, `視野の半角 視野20 ${(m.fov[16] * 57.3).toFixed(0)}° / 視野1 ${(m.fov[5] * 57.3).toFixed(0)}°`);
 });
 await test('percept: ボールを持っている選手は扇が狭い（すぐそばの気配は同じ）。気配で分かる距離は、味方 10m・相手 6m', () => {
   const inp = sampleInput(2, OPT);

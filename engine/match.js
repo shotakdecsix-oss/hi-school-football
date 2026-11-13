@@ -9,7 +9,7 @@ import {
 import { FORMATIONS, ROLE } from '../data/formations.js';
 import { normRules } from '../data/rules.js';
 import { hash4 } from './core/rng.js';
-import { AB, NAB, abVec } from './abil.js';
+import { AB, NAB, effVec } from './abil.js';
 import { stepBall, BALL_EV } from './ball.js';
 import { think, movePlayers, carryBall, touches, takeControl, takerReady, standSpot, keepOut } from './brain.js';
 import { decide } from './decide.js';
@@ -150,7 +150,7 @@ function resetTouches(N) {
 
 // 選手 i（チーム内の位置は固定）に、能力 ab の選手を入れる（入力から決まる値を作り直す）
 function setPlayerAb(m, i, ab) {
-  const v = abVec(ab);
+  const v = effVec(ab); // 実効値（能力の効きを寝かせたもの。abil.js）
   m.ab.set(v, i * NAB);
   m.vmax0[i] = 5.8 + 0.22 * v[AB.SPD]; // 最高速度 (m/s)
   m.acc0[i] = 4 + 0.2 * v[AB.ACC]; // 加速度 (m/s²)

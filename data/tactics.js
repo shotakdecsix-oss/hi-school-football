@@ -3,9 +3,9 @@
 // 理論の名前（ゲーゲンプレスなど）は、この指示の組み合わせ（おすすめ設定）として後から用意する。
 export const TACTICS = [
   { key: 'build', group: '攻撃', name: '組み立て', lo: 'ショートパスでつなぐ', hi: 'ロングボールで進める', on: false },
-  { key: 'tempo', group: '攻撃', name: 'テンポ', lo: 'ゆっくり', hi: '速く', on: false },
-  { key: 'width', group: '攻撃', name: '幅', lo: '狭く', hi: '広く', on: false },
-  { key: 'attack', group: '攻撃', name: '攻め方', lo: '中央から', hi: 'サイドから', on: false },
+  { key: 'tempo', group: '攻撃', name: 'テンポ', lo: 'ゆっくり', hi: '速く', on: true },
+  { key: 'width', group: '攻撃', name: '幅', lo: '狭く', hi: '広く', on: true },
+  { key: 'attack', group: '攻撃', name: '攻め方', lo: '中央から', hi: 'サイドから', on: true },
   { key: 'risk', group: '攻撃', name: 'リスク', lo: '安全に（後ろに残す）', hi: '冒険する（全員で攻める）', on: true },
   { key: 'line', group: '守備', name: 'ライン高さ', lo: '低い', hi: '高い', on: true },
   { key: 'pressZone', group: '守備', name: 'プレス開始位置', lo: '自陣に引いて待つ', hi: '敵陣から', on: true },

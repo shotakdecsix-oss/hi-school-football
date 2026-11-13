@@ -10,7 +10,7 @@ import { BALL_EV } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
-import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode } from './decide.js';
+import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 
 // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）は、指示（ライン高さ）から決まる m.tac[k].floorD（標準 13）。6ヤードボックスに張り付いて壁になるのを防ぐ
@@ -22,6 +22,8 @@ const KX_DEF = [0, 0.95, 0.95, 1, 1, 1, 0.9, 0.65];
 const PRESS_BIAS = [1, 1.7, 1.15, 0.95, 1, 1.05, 1.1, 1.25]; // プレスに行きやすさ（小さいほど行く）
 const UR = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]];
 const CH = [-0.65, -0.33, 0, 0.33, 0.65]; // 裏へ抜ける動きの横位置（ピッチ幅に対する割合）
+const RISK_PUSH = [0, 3, 4, 3, 4, 3, 3, 2]; // 指示 リスクで前へ出る量（push 1 あたり m。G C S D M W A F）
+const laneOf = (y) => (y < -20.4 ? 0 : y < -6.8 ? 1 : y < 6.8 ? 2 : y < 20.4 ? 3 : 4); // 5レーン（幅 13.6m ずつ。大外・ハーフスペース・中央・ハーフスペース・大外）
 
 // いま使う守備の数値。ボールを失った直後の窓（指示 onLose。失ってから loseW tick の間）は、切り替え用の数値（tacT）に替わる
 function tcOf(m, k) {
@@ -53,8 +55,8 @@ function predictBall(m) {
 
 // ボール保持者(cpx,cpy)へのサポート位置: 保持者の周り（7/12/17m × 8方向）から、パスコースが空いていて、
 // 相手に離れていて、前へ進めて、持ち場から遠すぎず、味方と重ならない場所を選ぶ。
-function supportSpot(m, k, i, dir, cpx, cpy, line) {
-  const { px, py, tx, ty, hx, hy } = m;
+function supportSpot(m, k, i, dir, cpx, cpy, line, bl0, bl1) {
+  const { px, py, tx, ty, hx, hy } = m, ap = m.tac[k];
   const o0 = (1 - k) * 11, j0 = k * 11;
   let best = -1e9, bx = tx[i], by = ty[i];
   for (let ri = 0; ri < 3; ri++) {
@@ -68,14 +70,16 @@ function supportSpot(m, k, i, dir, cpx, cpy, line) {
       let dm = 1e9;
       for (let q = o0; q < o0 + 11; q++) { const dx = px[q] - wx, dy = py[q] - wy, d2 = dx * dx + dy * dy; if (d2 < dm) dm = d2; }
       const open = clamp((Math.sqrt(dm) - 1.5) / 5, 0, 1);
-      let sc = safe * (0.3 + 0.7 * open) * (0.02 + xt(f, wy * dir)) * 10;
+      let sc = safe * (0.3 + 0.7 * open) * (0.02 + xt(f, wy * dir) * latM(ap, f, wy * dir)) * 10;
       const hdx = wx - hx[i], hdy = wy - hy[i], cdx = wx - tx[i], cdy = wy - ty[i];
-      sc -= 0.04 * Math.sqrt(hdx * hdx + hdy * hdy) + 0.02 * Math.abs(r - 11) + 0.015 * Math.sqrt(cdx * cdx + cdy * cdy);
+      sc -= 0.04 * Math.sqrt(hdx * hdx + hdy * hdy) + 0.02 * Math.abs(r - ap.supR) + 0.015 * Math.sqrt(cdx * cdx + cdy * cdy);
+      if (f < bl1 - 1 && f > bl0 + 1) sc += ap.btwK * open; // ライン間（相手の中盤の線と最終ラインのあいだ）で受ける（幅が広い指示のとき。bl0=1e9 なら無効）
       for (let jj = j0 + 1; jj < j0 + 11; jj++) {
         if (jj === i) continue;
         const ax = wx - tx[jj], ay = wy - ty[jj], d2 = ax * ax + ay * ay;
         if (d2 < 49) sc -= 0.35 * (1 - Math.sqrt(d2) / 7);
       }
+      if (ap.hsK > 0) { const ln = laneOf(wy); if (ln === 1 || ln === 3) sc += ap.hsK * open; } // 5レーン: ハーフスペースで受ける（幅が広い指示のとき）
       if (sc > best) { best = sc; bx = wx; by = wy; }
     }
   }
@@ -84,7 +88,7 @@ function supportSpot(m, k, i, dir, cpx, cpy, line) {
 
 // 裏へ抜ける動き: 相手の最終ラインの肩（ライン-1m）か少し下がった位置のうち、保持者からのコースが空いている横位置へ
 function runSpot(m, k, i, dir, cpx, cpy, line) {
-  const { px, py, tx, ty, hx, hy } = m;
+  const { px, py, tx, ty, hx, hy } = m, ap = m.tac[k];
   const o0 = (1 - k) * 11, j0 = k * 11;
   let best = -1e9, bx = tx[i], by = ty[i];
   for (let ci = 0; ci < 5; ci++) {
@@ -95,7 +99,7 @@ function runSpot(m, k, i, dir, cpx, cpy, line) {
       let dm = 1e9;
       for (let q = o0; q < o0 + 11; q++) { const dx = px[q] - wx, dy = py[q] - wy, d2 = dx * dx + dy * dy; if (d2 < dm) dm = d2; }
       const open = clamp((Math.sqrt(dm) - 1.5) / 5, 0, 1);
-      let sc = safe * (0.3 + 0.7 * open) * (0.02 + xt(f, g)) * 10 + (di === 0 ? 0.12 : 0);
+      let sc = safe * (0.3 + 0.7 * open) * (0.02 + xt(f, g) * latM(ap, f, g)) * 10 + (di === 0 ? 0.12 : 0);
       const hdx = wx - hx[i], hdy = wy - hy[i], cdx = wx - tx[i], cdy = wy - ty[i];
       sc -= 0.015 * Math.sqrt(hdx * hdx + hdy * hdy) + 0.015 * Math.sqrt(cdx * cdx + cdy * cdy);
       for (let jj = j0 + 1; jj < j0 + 11; jj++) {
@@ -130,8 +134,15 @@ function assignChase(m, k, att, recv, bfx, bfy) {
 
 // 攻撃: 保持者(c)に近い3人がサポート、前線の2人が裏へ抜ける動き。残りは動的な陣形（持ち場）
 function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
-  const { px, py, role, ab, act, fl, tx, ty, rest } = m, j0 = k * 11;
-  const rn = m.tac[k].restN, wa = winMode(m, k); // rn: 後ろに残す追加の人数（リスク）、wa: 奪った直後の窓の指示値
+  const { px, py, role, ab, act, fl, tx, ty, rest } = m, j0 = k * 11, o0 = (1 - k) * 11;
+  const rn = m.tac[k].restN, wa = winMode(m, k);
+  let bl0 = 1e9, bl1 = -1e9; // ライン間: 相手の中盤の線(深い順に5〜8人目の平均)〜最終ライン(深い4人の平均)。指示 幅 が広いときだけ使う
+  if (m.tac[k].btwK > 0) {
+    const fs = [];
+    for (let q = o0; q < o0 + 11; q++) if (m.slot[q] !== 0) fs.push(m.px[q] * dir);
+    fs.sort((a, b) => b - a);
+    bl1 = (fs[0] + fs[1] + fs[2] + fs[3]) / 4; bl0 = (fs[4] + fs[5] + fs[6] + fs[7]) / 4;
+  } // rn: 後ろに残す追加の人数（リスク）、wa: 奪った直後の窓の指示値
   const held = (i) => rest[i] >= 0 && rest[i] < rn;
   if (c >= 0 && bfx > 5) { // SBのオーバーラップ: ボールが自分の側の敵陣にあるとき、保持者の外側・前へ走り込む（1人）
     let a = -1, bd = 1e9;
@@ -159,10 +170,10 @@ function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
     }
     if (a < 0) break;
     act[a] = ACT.SUPPORT;
-    supportSpot(m, k, a, dir, cpx, cpy, line);
+    supportSpot(m, k, a, dir, cpx, cpy, line, bl0, bl1);
   }
   if (c >= 0 && cpx * dir > -25 - (wa > 0 ? 25 * wa : 0)) { // 縦に速く: 自陣深くからでも前線が走り出す。人数も増える（最大4人）。キープ: 走る人数が減る
-    const nRun = wa > 0 ? 2 + (wa > 0.35 ? 1 : 0) + (wa > 0.8 ? 1 : 0) : wa < -0.3 ? (wa < -0.8 ? 0 : 1) : 2;
+    const nRun = Math.max(0, (wa > 0 ? 2 + (wa > 0.35 ? 1 : 0) + (wa > 0.8 ? 1 : 0) : wa < -0.3 ? (wa < -0.8 ? 0 : 1) : 2) + m.tac[k].runPlus);
     for (let n = 0; n < nRun; n++) {
       let a = -1, ba = -1e9;
       for (let s = 1; s < 11; s++) {
@@ -303,7 +314,7 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         if (tc.recPc > 0) { const rx = tx[i] - px[i], ry = ty[i] - py[i]; if (rx * rx + ry * ry > 25 && pc[i] < tc.recPc) pc[i] = tc.recPc; } // 失った直後に戻る: 遠い持ち場へ全力で
         break;
       }
-      case ACT.SUPPORT: pc[i] = 0.55; break;
+      case ACT.SUPPORT: pc[i] = m.tac[k].supPc; break;
       case ACT.RUN: pc[i] = 0.9; break;
       case ACT.RECV:
         if (icT[i] < 99) { tx[i] = icX[i]; ty[i] = icY[i]; } else { tx[i] = F[F_PASS]; ty[i] = F[F_PASS + 1]; }
@@ -373,7 +384,7 @@ function followNeighbors(m, k, dir, att, bx, by) {
 
 function planTeam(m, k, P, own, live) {
   const { F, N, px, py, team, role, fd, fl, act, tgt, tmr, hx, hy, pa } = m;
-  const dir = dirOf(N, k), att = P === k, j0 = k * 11, tc = tcOf(m, k), wa = att ? winMode(m, k) : 0;
+  const dir = dirOf(N, k), att = P === k, j0 = k * 11, tc = tcOf(m, k), ap = m.tac[k], wa = att ? winMode(m, k) : 0;
   const loose = live && own < 0, recv = loose ? N[I.RECV] : -1;
   let bx = F[F_B], by = F[F_B + 1];
   if (!live) {
@@ -399,13 +410,14 @@ function planTeam(m, k, P, own, live) {
     let f = cx0 + (-HL + fd[i] * 2 * HL - cx0) * compr + (att ? shiftA * KX_ATT[r] : shiftD * KX_DEF[r]);
     if (!att) f += tc.lineOff * LINE_W[r] + tc.frontOff * FRONT_W[r]; // 守備: ライン高さ（ブロック全体）とプレス開始位置（前線の押し上げ）
     else if (wa !== 0 && r >= ROLE.M) f += 5 * wa; // 奪った直後: 縦に速く(+)は前線が前へ、キープ(-)は少し下がって寄る
-    let g = fl[i] * HW * 0.9 * (att ? (r === ROLE.W || r === ROLE.S ? 1.05 : 0.96) : tc.widthD);
+    let g = fl[i] * HW * 0.9 * (att ? (r === ROLE.W || r === ROLE.S ? 1.05 : 0.96) * ap.wideK * (r === ROLE.W ? ap.wingK : 1) : tc.widthD); // 攻撃: 指示 幅（全体の広がり）・攻め方（ウイングの内外）
     if (att && r === ROLE.S) { // SBはボール側で高く上がる。逆サイドは絞って最終ラインに残る（カウンターへの備え）
       const w = clamp((sfx + 15) / 45, 0, 1), near = clamp(0.5 + (fl[i] > 0 ? sfy : -sfy) / 20, 0, 1);
-      f += SB_UP * w * (0.35 + 0.65 * near);
+      f += SB_UP * ap.sbUpK * w * (0.35 + 0.65 * near);
       g *= 1 - SB_TUCK * tc.tuckK * (1 - near) * w;
     }
-    g = clamp(g + (sfy - g) * (att ? 0.12 : tc.shiftY), -HW + 2, HW - 2);
+    g = clamp(g + (sfy - g) * (att ? ap.farShift : tc.shiftY), -HW + 2, HW - 2); // 攻撃: 逆サイドの選手がボール側へ寄る割合（指示 幅。広いほど持ち場を保つ）
+    if (att && ap.push !== 0) f += RISK_PUSH[r] * ap.push; // リスク: 冒険する(+)は全員が前へ出る（安全に(-)は少し控える）
     if (att && (r >= ROLE.M || r === ROLE.S)) f = Math.min(f, line - 0.7); // 攻撃の選手は最終ラインを越えない
     if (att && m.rest[i] >= 0 && m.rest[i] < tc.restN) f = Math.min(f, 3 + 0.25 * sfx); // リスクが低い指示: CB以外の深い選手は、ハーフウェー付近（ボールが敵陣深くでも 10m 前後まで）に残る（カウンターへの備え）
     else if (!att && r <= ROLE.D && r !== ROLE.G) f = Math.max(f, -HL + tc.floorD); // 守備のラインは、ゴールライン際に張り付かない

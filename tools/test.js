@@ -18,7 +18,9 @@ import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
 
 let fails = 0;
+const ONLY = process.env.ONLY; // 例: ONLY=攻撃の指示 node tools/test.js（名前にその文字を含む検査だけ走らせる）
 const test = async (name, fn) => {
+  if (ONLY && !name.includes(ONLY)) return;
   try {
     const note = await fn();
     console.log('  ok  ' + name + (note ? '  … ' + note : ''));
@@ -399,7 +401,7 @@ await test('tactics: 指示を省略した試合・全部0の試合は、これ�
   assert.equal(digestMatch(a), digestMatch(b));
 });
 await test('tactics: 指示ありでも、同じ入力は同じ結果で、途中の保存→復元→再開も通しと一致', () => {
-  const T = { line: 1, compact: 0.6, pressZone: -0.5, pressPower: 0.7, defStyle: -1 }, U = { line: -0.8, compact: -0.3, pressZone: 0.9, pressPower: -0.6, defStyle: 1 };
+  const T = { line: 1, compact: 0.6, pressZone: -0.5, pressPower: 0.7, defStyle: -1, width: 0.8, tempo: -0.6, attack: 0.5, risk: 0.9, onWin: 0.5, onLose: 0.7 }, U = { line: -0.8, compact: -0.3, pressZone: 0.9, pressPower: -0.6, defStyle: 1, width: -0.7, tempo: 0.9, attack: -1, risk: -0.8, onWin: -0.5, onLose: -0.6 };
   const input = sampleInput(8, { ...OPT, homeTac: T, awayTac: U }), a = createMatch(input), b = createMatch(input);
   run(a, 20000); run(b, 20000);
   assert.equal(digestMatch(a), digestMatch(b), '同じ入力');
@@ -491,6 +493,63 @@ await test('transition: 切り替え（失った直後・奪った直後）と�
   assert.ok(v1.prog > bw.prog + 0.5 && v0.prog < bw.prog - 1, `奪った直後: 4秒後のボールの前進 縦に速く ${f(v1.prog)} 標準 ${f(bw.prog)} キープ ${f(v0.prog)}（m）`);
   assert.ok(rs.sb < b.sb - 4, `リスクが低い: 敵陣の奥で攻めているとき、後ろへ残す2人の位置 ${f(rs.sb)}（標準 ${f(b.sb)} m）`);
   return `5秒奪回 ${f(gp.reg5)}/${f(b.reg5)}  3秒後の重心 ${f(rt.cen)}/${f(b.cen)}/${f(gp.cen)}  4秒前進 ${f(v1.prog)}/${f(bw.prog)}/${f(v0.prog)}  残す位置 ${f(rs.sb)}/${f(b.sb)}`;
+});
+// 攻撃の配置の集計。チーム0だけに指示を与え、相手は標準。チーム0が持っている間の、横幅・逆サイドの幅・敵陣最終盤のボールの通り道・後ろに残る人数と、パス（本数・持ち時間・前向き）
+function atkStats(tac, seeds = [1, 2, 3, 4, 5, 6, 7, 8], minutes = 10) {
+  const o = { n: 0, wid: 0, farN: 0, far: 0, fl: [0, 0, 0], bN: 0, behind: 0, pass: 0, passN: 0, hold: 0, holdN: 0, fwd: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
+    let lastK = -1;
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      if (m.N[I.KICKT] !== lastK) { // 蹴った。チーム0の外野手のパスなら、持ち時間と向きを数える
+        lastK = m.N[I.KICKT];
+        const ps = m.N[I.LAST];
+        if (m.N[I.RECV] >= 0 && m.N[I.PASSK] === 0 && ps >= 0 && m.team[ps] === 0 && m.slot[ps] !== 0 && m.N[I.PHASE] === PHASE.LIVE) {
+          const hold = (lastK - m.N[I.GOT]) * 0.05;
+          o.passN++; if ((m.F[F_PASS] - m.F[F_B + 6]) * dirOf(m.N, 0) > 3) o.fwd++;
+          if (hold >= 0 && hold < 5) { o.hold += hold; o.holdN++; }
+        }
+      }
+      if (m.t % 10 || m.N[I.PHASE] !== PHASE.LIVE) continue;
+      const own = m.N[I.OWN];
+      if (own < 0 || m.team[own] !== 0) continue;
+      const dir = dirOf(m.N, 0), bfx = m.F[F_B] * dir, by = m.F[F_B + 1];
+      let y0 = 99, y1 = -99, bh = 0;
+      for (let i = 1; i < 11; i++) {
+        y0 = Math.min(y0, m.py[i]); y1 = Math.max(y1, m.py[i]);
+        if (bfx > 0 && i !== own && m.px[i] * dir < bfx - 5) bh++;
+        if (bfx > 10 && i !== own && Math.abs(by) > 8 && m.py[i] * by < 0 && Math.abs(m.py[i] - by) > 20) { o.far += Math.abs(m.py[i]); o.farN++; }
+      }
+      if (bfx > 10) { o.n++; o.wid += y1 - y0; }
+      if (bfx > 0) { o.bN++; o.behind += bh; }
+      if (bfx > 17.5) o.fl[Math.abs(by) > 20.4 ? 0 : Math.abs(by) > 6.8 ? 1 : 2]++;
+    }
+    o.pass += m.N[I.ST + ST.PASS];
+  }
+  const fs = o.fl[0] + o.fl[1] + o.fl[2];
+  return { wid: o.wid / o.n, far: o.far / Math.max(1, o.farN), wide: o.fl[0] / fs, hs: o.fl[1] / fs, cen: o.fl[2] / fs, behind: o.behind / o.bN, pass: o.pass / seeds.length, hold: o.hold / o.holdN, fwd: o.fwd / o.passN };
+}
+await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク）が配置と判断に効く', () => {
+  const S = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const b = atkStats({}, S), W1 = atkStats({ width: 1 }, S), W0 = atkStats({ width: -1 }, S), T1 = atkStats({ tempo: 1 }, S), T0 = atkStats({ tempo: -1 }, S);
+  const A1 = atkStats({ attack: 1 }, S), A0 = atkStats({ attack: -1 }, S), R1 = atkStats({ risk: 1 }, S), R0 = atkStats({ risk: -1 }, S);
+  const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
+  assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
+  assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
+  assert.ok(W1.hs > b.hs + 0.04, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`);
+  assert.ok(T1.hold < b.hold - 0.2 && T0.pass < b.pass * 0.92, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b.pass)}（10分あたり）`);
+  assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
+  assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
+  assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.4, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
+  return `横幅 ${f(W1.wid)}/${f(b.wid)}/${f(W0.wid)}  持ち時間 ${f(T1.hold)}/${f(b.hold)}  大外 ${p(A1.wide)}/${p(b.wide)}/${p(A0.wide)}  後ろに残る ${f(R1.behind)}/${f(b.behind)}/${f(R0.behind)}`;
+});
+await test('tactics: 攻撃の指示を0にすると、数値は標準のまま（全部の倍率が1・加点が0）。±1でその向きに動く', () => {
+  const z = tacParams({});
+  const keep = { wideK: 1, farShift: 0.12, supR: 11, hsK: 0, btwK: 0, reactK: 1, passCost: 0.01, hold0: 1.5, supPc: 0.55, latK: 0, wingK: 1, sbUpK: 1, lossK: 1, shtK: 1, push: 0, runPlus: 0 };
+  for (const [k, v] of Object.entries(keep)) assert.equal(z[k], v, k);
+  const a = tacParams({ width: 1, tempo: 1, attack: 1, risk: 1 }), c = tacParams({ width: -1, tempo: -1, attack: -1, risk: -1 });
+  assert.ok(a.wideK > 1 && a.farShift < 0.12 && a.hsK > 0 && a.reactK < 1 && a.passCost < 0.01 && a.latK > 0 && a.lossK < 1 && a.shtK > 1 && a.push > 0 && a.runPlus === 1);
+  assert.ok(c.wideK < 1 && c.farShift > 0.12 && c.hsK === 0 && c.reactK > 1 && c.passCost > 0.01 && c.latK < 0 && c.lossK > 1 && c.shtK < 1 && c.push < 0 && c.runPlus === -1);
 });
 await test('transition: 切り替えの指示を0にすると窓が開かない（loseW/winW = 0、tacT なし）。指示があるとき窓の長さは最大 6 秒', () => {
   const z = tacParams({ onLose: 0, onWin: 0, risk: 0 });

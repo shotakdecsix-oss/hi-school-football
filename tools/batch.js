@@ -7,7 +7,7 @@
 //   指示を与えるか --def を付けると、守備のブロック（相手が保持しているときの陣形）の表も出す
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
-import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, F_STA, dirOf } from '../engine/consts.js';
+import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, F_PASS, F_STA, dirOf } from '../engine/consts.js';
 import { RULES } from '../data/rules.js';
 import { TACTICS } from '../data/tactics.js';
 import { staminaOf } from '../engine/stamina.js';
@@ -45,6 +45,9 @@ const DZ = [0, 1].map(() => Array.from({ length: 3 }, () => ({ n: 0, line: 0, le
 const SH = [0, 1].map(() => [0, 0]); // 前半・後半ごとのシュート数
 const STA = [0, 1].map(() => ({ h1: 0, end: 0, min: 1 })); // スタミナ: 前半の終わり・試合の終わりの平均（外野手）と、最低の選手
 const TR = [0, 1].map(() => ({ lost: [0, 0, 0], reg5: [0, 0, 0], shots8: [0, 0, 0], goals8: [0, 0, 0], won: 0, wshots8: 0, prog4: 0, progN: 0, behind: 0, behindN: 0, oh: 0, ohN: 0, r3b: 0, r3n: 0, r3c: 0 }));
+// 攻撃の配置: far=逆サイドの選手の幅(m)、ovl=敵陣の同レーン重なり率、lanes=占有レーン数、fl=敵陣最終盤でボールのいる所(大外/ハーフスペース/中央)、pass=パスの長さ・向き・間隔・持ち時間
+const AP = [0, 1].map(() => ({ far: 0, farN: 0, ovl: 0, ovlN: 0, lanes: 0, laneN: 0, fl: [0, 0, 0], pn: 0, plen: 0, fwd: 0, bwd: 0, hold: 0, gap: 0, gapN: 0, sup: 0, supN: 0, btw: 0, btwN: 0 }));
+const laneOf = (y) => (y < -20.4 ? 0 : y < -6.8 ? 1 : y < 6.8 ? 2 : y < 20.4 ? 3 : 4); // 5レーン（幅 13.6m ずつ）
 let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0, pkMatches = 0;
 const pkRes = [0, 0, 0]; // PK戦の1本ごとの結果（外れ・ゴール・セーブ）
 const t0 = performance.now();
@@ -52,9 +55,21 @@ const t0 = performance.now();
 for (let s = 0; s < n; s++) {
   const input = mkInput(seed0 + s), m = createMatch(input);
   let lastC = -1e9;
+  let lastK = -1; const lastPass = [null, null];
   const chg = [], pend = [], pend3 = []; // 切り替え（ボールを持つチームが入れ替わった）の記録と、4秒後のボールの位置を見る予約
   while (stepMatch(m)) {
     if (m.t === m.pEnd[0] - 1) for (let k = 0; k < 2; k++) STA[k].h1 += staminaOf(m, k);
+    if (m.N[I.KICKT] !== lastK) { // 蹴った（パスなら、受け手が決まっている）
+      lastK = m.N[I.KICKT];
+      const ps = m.N[I.LAST], pk2 = m.N[I.PASSK];
+      if (m.N[I.RECV] >= 0 && pk2 >= 0 && ps >= 0 && m.team[ps] === pk2 && m.slot[ps] !== 0 && m.N[I.PHASE] === PHASE.LIVE) {
+        const A = AP[pk2], dd = dirOf(m.N, pk2), ex = m.F[F_PASS] - m.F[F_B + 6], ey = m.F[F_PASS + 1] - m.F[F_B + 7], hold = (lastK - m.N[I.GOT]) * 0.05;
+        A.pn++; A.plen += Math.sqrt(ex * ex + ey * ey); if (ex * dd > 3) A.fwd++; else if (ex * dd < -3) A.bwd++;
+        if (hold >= 0 && hold < 5) { A.hold += hold; A.sup++; }
+        if (lastPass[pk2] && lastPass[pk2][1] === m.N[I.CHGT] && lastK - lastPass[pk2][0] <= 200) { A.gap += (lastK - lastPass[pk2][0]) * 0.05; A.gapN++; }
+        lastPass[pk2] = [lastK, m.N[I.CHGT]];
+      }
+    }
     const cc = m.N[I.CHGT];
     if (cc !== lastC) {
       lastC = cc;
@@ -103,6 +118,29 @@ for (let s = 0; s < n; s++) {
       }
       if (att && bfx2 > 0) { TR[k].behind += bh; TR[k].behindN++; }
       if (att && bfx2 > 15) { TR[k].oh += oh; TR[k].ohN++; }
+      if (att && bfx2 > 10) { // 攻撃中（ボールが敵陣）: 逆サイドの幅・敵陣の同レーン重なり・占有レーン数
+        const A = AP[k], by2 = m.F[F_B + 1], front = [];
+        for (let s2 = 1; s2 < 11; s2++) {
+          const i = base + s2, fx = m.px[i] * dir;
+          if (i !== own && Math.abs(by2) > 8 && m.py[i] * by2 < 0 && Math.abs(m.py[i] - by2) > 20) { A.far += Math.abs(m.py[i]); A.farN++; }
+          if (fx > 0) front.push([fx, laneOf(m.py[i])]);
+        }
+        { // ライン間: 相手の中盤の線（深い順に5〜8人目の平均）と最終ライン（深い4人の平均）のあいだにいる自分の外野手の数
+          const fs = [];
+          for (let q = (1 - k) * 11; q < (1 - k) * 11 + 11; q++) if (m.slot[q] !== 0) fs.push(m.px[q] * dir);
+          fs.sort((a, b) => b - a);
+          const l1 = (fs[0] + fs[1] + fs[2] + fs[3]) / 4, l0 = (fs[4] + fs[5] + fs[6] + fs[7]) / 4;
+          let c = 0;
+          for (let s2 = 1; s2 < 11; s2++) { const i = base + s2, fx = m.px[i] * dir; if (i !== own && fx > l0 + 1 && fx < l1 - 1) c++; }
+          A.btw += c; A.btwN++;
+        }
+        if (front.length >= 3) {
+          const set = new Set(front.map((q) => q[1]));
+          A.lanes += set.size; A.laneN++;
+          for (let u = 0; u < front.length; u++) { A.ovlN++; if (front.some((q, v) => v !== u && q[1] === front[u][1] && Math.abs(q[0] - front[u][0]) < 12)) A.ovl++; }
+        }
+        if (bfx2 > 17.5) A.fl[Math.abs(m.F[F_B + 1]) > 20.4 ? 0 : Math.abs(m.F[F_B + 1]) > 6.8 ? 1 : 2]++;
+      }
       if (att) {
         const cx = m.px[own], cy = m.py[own], ds = [];
         for (let s2 = 1; s2 < 11; s2++) {
@@ -157,6 +195,13 @@ console.log('攻撃中の動き（保持側の外野手）  陣形から8m超/12
 for (let k = 0; k < 2; k++) {
   const M = mv[k], per = M.n / Math.max(1, M.ticks);
   console.log(`  チーム${k}   ${f1(M.far8 / Math.max(1, M.ticks))}人 / ${f1(M.far12 / Math.max(1, M.ticks))}人 （外野9人中）   ${f1(M.disp / Math.max(1, M.n))}m   ${f1(M.near15 / Math.max(1, M.ticks))}人   ${f1(M.near3 / Math.max(1, M.ticks))}m   ${f1(M.len / Math.max(1, M.ticks))}m / ${f1(M.wid / Math.max(1, M.ticks))}m${per ? '' : ''}`);
+}
+{
+  console.log('攻撃の配置（保持側）  逆サイドの選手の幅(ボールと反対側・20m超離れた外野手の|y|)  敵陣の同レーン重なり率(前後12m)  敵陣の占有レーン数  敵陣最終盤のボールの通り道(大外/ハーフスペース/中央)  パス: 長さ  前/後ろ向き  持ち時間  間隔  ライン間の人数');
+  for (let k = 0; k < 2; k++) {
+    const A = AP[k], fs = A.fl[0] + A.fl[1] + A.fl[2];
+    console.log(`  チーム${k}   ${f1(A.far / Math.max(1, A.farN))}m   ${pc(A.ovl / Math.max(1, A.ovlN))}   ${f1(A.lanes / Math.max(1, A.laneN))}   ${pc(A.fl[0] / Math.max(1, fs))}/${pc(A.fl[1] / Math.max(1, fs))}/${pc(A.fl[2] / Math.max(1, fs))}   ${f1(A.plen / Math.max(1, A.pn))}m  ${pc(A.fwd / Math.max(1, A.pn))}/${pc(A.bwd / Math.max(1, A.pn))}  ${f1(A.hold / Math.max(1, A.sup))}秒  ${f1(A.gap / Math.max(1, A.gapN))}秒  ${f1(A.btw / Math.max(1, A.btwN))}人`);
+  }
 }
 if (showDef) {
   console.log('守備のブロック（相手が保持中。自陣ゴール=-52.5、攻める向き+）  ボール位置:  自陣(〜-17)  |  中盤  |  敵陣(17〜)      各: 時間割合 最終ライン(深い4人の平均) 縦幅 横幅 寄せ/カバー/マーク人数 ボールに最も近い守備者');

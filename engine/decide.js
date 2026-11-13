@@ -9,7 +9,6 @@ import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
 import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
-const PASS_COST = 0.010; // パスを出すこと自体の手間（テンポが切れる・動きが読まれる）。つなぐだけのパスを減らす
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
 const K_DRIB = 0.85, K_PASS = 1.0; // 調整用の倍率（一括実行の数値を見て合わせる）
 // シュートの価値の倍率: 位置と能力だけの見込み(xG)が低いほど控えめ(SHOT_LO)、高いほど積極的(SHOT_HI)。撃てる位置ほど撃つ意識が強く、遠いシュートは控えめ
@@ -22,6 +21,13 @@ const BLK = 0.75, PRS_S = 0.3, ZN = 15, ZW = 6, CONT = 1.0;
 const WIN_K = 0.5; // 奪った直後の窓での、前へ進める価値・リスクの重みの変え方（指示 ±1 で ±50%）
 const K_PRS = 0.5; // 行き先の圧力による価値の割引（圧力1.5で 1-1.5*K_PRS）。人でごった返すゴール前へ突っ込まない
 const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0.25 ? f : 0.25; };
+
+// 攻め方（中央から ←→ サイドから）: 行き先の価値を、横位置で増減する倍率。敵陣のほうが強く効く。指示が 0 なら 1
+export function latM(ap, dfx, dfy) {
+  if (ap.latK === 0) return 1;
+  const w = clamp((dfx - 5) / 25, 0, 1), a = (Math.abs(dfy) - 17) / 17;
+  return 1 + ap.latK * w * (a < -1 ? -1 : a > 1 ? 1 : a);
+}
 
 // 点 (fx,fy)（攻める向きを+にした座標）から撃ったときの見込み（得点の確率の目安）。
 // 位置の見込み(xG) × シュート能力の補正 shtF × コースに立つ相手（GK以外）× 圧力
@@ -52,7 +58,7 @@ const CL = [4.5, 9];
 const RELIEF = 0.016; // 相手の圧力が減る場所へ運ぶ価値（圧力1あたり）
 const MOM = 0.005; // 今の走る向きを続ける価値（急に向きを変える・止まるのは時間を失う）
 const CARRY_COST = 0.002, CARRY_M = 0.0; // 運ぶ手間（ボールが足元から離れる。距離にも比例）
-const HOLD0 = 1.5, HOLD_W = 0.006; // 持ち続けて HOLD0 秒を過ぎると、1秒ごとに HOLD_W ずつ運ぶ価値が下がる（味方を探してパスする）
+const HOLD_W = 0.006; // 持ち続けて hold0（指示 テンポ。標準 1.5）秒を過ぎると、1秒ごとに HOLD_W ずつ運ぶ価値が下がる（味方を探してパスする）
 
 // ドリブルのタッチミス（ボールが足元から離れて奪い合いになる）の起こりやすさ（1秒あたり）。
 // 速く走るほど・圧力が強いほど・ドリブルが下手なほど起こる。brain.js の carryBall が実際に起こし、判断（運ぶ価値）も同じ式で見積もる。
@@ -129,7 +135,7 @@ export function laneSafe(m, k, x0, y0, x1, y1, v0) {
 // ボールを受けてから次の判断までの tick（判断力が高いほど早く、圧力が強いほど急ぐ）
 export function reactTicks(m, p, press) {
   const q = clamp(1 - 0.55 * press, 0.3, 1);
-  return Math.round(clamp(8 + (18 + 0.8 * (20 - m.ab[p * NAB + AB.DEC])) * q * q, 6, 50));
+  return Math.round(clamp((8 + (18 + 0.8 * (20 - m.ab[p * NAB + AB.DEC])) * q * q) * m.tac[m.team[p]].reactK, 6, 50)); // reactK: 指示 テンポ（標準 1）
 }
 
 // 保持者 i が運ぶ先の候補を全部採点して、cb(価値, 目標x, 目標y, 走る強さ, 距離) に渡す。
@@ -138,9 +144,9 @@ export function carryOptions(m, i, press, hold, cb) {
   const { px, py, vx, vy, team, ab, N } = m;
   const k = team[i], dir = dirOf(N, k), A = i * NAB, o0 = (1 - k) * 11;
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI], shtF = 0.4 + 0.06 * ab[A + AB.SHT];
-  const wa = winMode(m, k), wv = 1 + WIN_K * wa; // 奪った直後: 前へ進める価値の倍率（wv）と、失う危険の重み（LOSS_W × (1 - WIN_K×wa)）
-  const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * (1 - WIN_K * wa) * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
-  const held = (m.t - N[I.GOT]) * 0.05, tired = held > HOLD0 ? HOLD_W * (held - HOLD0) : 0; // 持ち続けた時間によるぶん
+  const ap = m.tac[k], wa = winMode(m, k), wv = 1 + WIN_K * wa; // 奪った直後: 前へ進める価値の倍率（wv）。失う危険の重みは LOSS_W × (1 - WIN_K×wa) × lossK（指示 リスク）
+  const sp = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]), lossV = LOSS_W * (1 - WIN_K * wa) * ap.lossK * xt(-fx, fy) + KEEP, pr = press > 1 ? 1 : press;
+  const held = (m.t - N[I.GOT]) * 0.05, tired = held > ap.hold0 ? HOLD_W * (held - ap.hold0) : 0; // 持ち続けた時間によるぶん
   for (let li = hold ? -1 : 0; li < 2; li++) {
     for (let u = 0; u < (li < 0 ? 1 : 7); u++) {
       const L = li < 0 ? 0 : CL[li], ux = li < 0 ? 0 : CD[u][0], uy = li < 0 ? 0 : CD[u][1];
@@ -163,7 +169,7 @@ export function carryOptions(m, i, press, hold, cb) {
         keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
       }
       const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
-      const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv, shtF) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
+      const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), shtF) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
   }
@@ -204,7 +210,7 @@ export function decide(m, i) {
   const vis = 10 + 2.5 * ab[A + AB.VIS]; // 見える範囲 (m)
   const pas = ab[A + AB.PAS], lng = gk ? ab[A + AB.GKD] : ab[A + AB.LNG];
   const pe = 1 + 0.5 * press * (1 - 0.03 * ab[A + AB.CMP]); // 圧力による蹴りの乱れ
-  const wa = winMode(m, k), wv = 1 + WIN_K * wa, lw = LOSS_W * (1 - WIN_K * wa); // 奪った直後の窓（標準は 0 で、倍率はすべて 1）
+  const ap = m.tac[k], wa = winMode(m, k), wv = 1 + WIN_K * wa, lw = LOSS_W * (1 - WIN_K * wa) * ap.lossK; // 奪った直後の窓・リスクの指示（標準は、倍率はすべて 1）
 
   let bV = -1e9, bt = 0, bj = -1, bdx = 0, bdy = 0, bpc = 0.5, bdist = 0, tag = 0;
   const consider = (V, type, j, dx, dy, pace, dist) => {
@@ -246,7 +252,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv, 0.4 + 0.06 * ab[B + AB.SHT]) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - PASS_COST;
+    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT]) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - ap.passCost;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
@@ -266,7 +272,7 @@ export function decide(m, i) {
       const shtF = 0.4 + 0.06 * ab[A + AB.SHT], raw = xgAt(dgx, fy) * shtF; // raw = 位置と能力だけの見込み
       const xg0 = shotQ(m, k, dir, fx, fy, press, shtF); // 相手・圧力を織り込んだ見込み
       const xg = xg0 * (SHOT_LO + (SHOT_HI - SHOT_LO) * clamp((raw - SHOT_X0) / SHOT_XW, 0, 1));
-      consider(xg + 0.004, 1, -1, HL * dir, 0);
+      consider(xg * ap.shtK + 0.004, 1, -1, HL * dir, 0); // shtK: 指示 リスク（冒険するほど撃つ。標準 1）
     }
   }
 

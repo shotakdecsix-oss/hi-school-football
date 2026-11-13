@@ -32,6 +32,24 @@ const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0
 // 誘い込めた度合いが 0〜1 に上がる（LURE_W m で最大。標準の相手は 7/18/31（10/50/90%）、高いライン・強いプレスの相手は 0/4/8）。指示の強さ lureK を掛けた値。lureK=0 なら 0（従来と同じ）。
 // 効き: ライン裏（最終ラインの 8m 手前〜）へのパスは、行き先の価値が最大 (1+LURE_X) 倍・長いパスの減点が 0 になる。brain.js では前線が自陣深くからでも裏へ走り出す
 const LURE_L0 = 14, LURE_W = 12, LURE_X = 1.5;
+
+// 浮き球・クリアの蹴り出し: ボールは蹴ってから約 3m のあいだ（高さが頭の高さ 2m を超えるまで）、通り道の横 1m（足が届く 0.8m ＋ 寄せてくる分）に
+// 相手が立っていると止められる。蹴る人のすぐそば（LB_NEAR m 以内）の相手も、足を出して止めることがある。止められずに済む確率 f を返す（見込み p に掛ける）。
+// 実測 v16: 浮き球の約半数が、蹴った直後に寄せてきた相手に当たり、95%が相手のボールになった。高プレスの強さの大きな原因（全部入り 18勝6分0敗 → 10勝9分5敗）。
+const LB_A = 3.4, LB_W = 1.0, LB_PL = 0.85, LB_NEAR = 1.7, LB_PN = 0.35, LB_C = 0.03;
+export function lobSafe(m, o0, x, y, tx, ty, aw) {
+  const { px, py } = m, ex = tx - x, ey = ty - y, D = Math.sqrt(ex * ex + ey * ey);
+  if (D < 1e-6) return 1;
+  const ux = ex / D, uy = ey / D;
+  let f = 1;
+  for (let q = o0; q < o0 + 11; q++) {
+    if (aw && aw[q] < 0.5) continue; // 見えていない相手は数えない
+    const qx = px[q] - x, qy = py[q] - y, a = qx * ux + qy * uy, l = qx * uy - qy * ux;
+    if (a > 0.3 && a < LB_A && l < LB_W && l > -LB_W) f *= 1 - LB_PL;
+    else if (qx * qx + qy * qy < LB_NEAR * LB_NEAR) f *= 1 - LB_PN;
+  }
+  return f;
+}
 export function lureOf(ap, line) { return ap.lureK > 0 ? ap.lureK * clamp((LURE_L0 - line) / LURE_W, 0, 1) : 0; }
 
 // 攻め方（中央から ←→ サイドから）: 行き先の価値を、横位置で増減する倍率。敵陣のほうが強く効く。指示が 0 なら 1
@@ -269,6 +287,7 @@ export function decide(m, i) {
       p = clamp(0.66 - 0.13 * n + 0.01 * ab[B + AB.TRP], 0.15, 0.8) * 0.55; // 競り合い・ファーストタッチ・ラインを割るぶんを織り込む（実測に合わせた）
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
+      p *= lobSafe(m, o0, x, y, dx, dy, aw); // 蹴り出しで止められる
     }
     let xtv = xt(dfx, dfy), lp = D > 26 ? ap.longPen - ap.longBon : 0;
     if (lu > 0) { const sb = lu * clamp((dfx - line + 8) / 8, 0, 1); xtv *= 1 + LURE_X * sb; lp *= 1 - sb; } // 擬似カウンター: ライン裏への行き先を高く、長いパスの減点を外す
@@ -302,8 +321,9 @@ export function decide(m, i) {
 
   // --- クリア（自陣で強く寄せられているとき）---
   if (!gk && sp === SP.NONE && fx < -28 && press > 0.4) {
-    consider(ap.clrK * (0.010 + 0.025 * press) - ap.clrLoss, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
-    consider(ap.clrK * (0.009 + 0.022 * press) - ap.clrLoss, 3, -1, x + dir * 12, y > 0 ? HW + 4 : -HW - 4); // 外（タッチライン）へ蹴り出す。相手ボールのスローインになる
+    const c1y = clamp(y * 0.4, -20, 20), c2y = y > 0 ? HW + 4 : -HW - 4;
+    consider(ap.clrK * (0.010 + 0.025 * press) - ap.clrLoss - LB_C * (1 - lobSafe(m, o0, x, y, x + dir * 36, c1y, aw)), 3, -1, x + dir * 36, c1y);
+    consider(ap.clrK * (0.009 + 0.022 * press) - ap.clrLoss - LB_C * (1 - lobSafe(m, o0, x, y, x + dir * 12, c2y, aw)), 3, -1, x + dir * 12, c2y); // 外（タッチライン）へ蹴り出す。相手ボールのスローインになる
   }
   if (bt === 0) { bt = 3; bj = -1; bdx = clamp(x + dir * 40, -HL + 3, HL - 3); bdy = clamp(y * 0.3, -25, 25); } // 選択肢が無いとき
 

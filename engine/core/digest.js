@@ -1,6 +1,9 @@
 // 状態のチェック値（16桁の16進）。試合の再現性の確認と、保存した試合の再生時の照合に使う。
-// 小数は 1/1024 単位に丸めてから混ぜる（-0 などの見かけの違いを吸収する。完全一致の検査には十分）。
+// 小数は64ビットの全ビットを混ぜる（v14から。丸めると、端末による小さなずれが途中で見えなかった）。-0 は 0、NaN は1種類にそろえる。
+// 並べ方は端末の並び（エンディアン）に依らないよう、下位32ビット→上位32ビットの順に固定する。
 import { mix32 } from './rng.js';
+
+const DV = new DataView(new ArrayBuffer(8));
 
 export class Digest {
   constructor() {
@@ -15,7 +18,11 @@ export class Digest {
     this.b ^= this.b >>> 13;
     return this;
   }
-  num(v) { return this.int(Number.isFinite(v) ? Math.round(v * 1024) : 0x7fc00000); }
+  num(v) {
+    if (v !== v) return this.int(0x7ff80000).int(0); // NaN
+    DV.setFloat64(0, v === 0 ? 0 : v, true); // -0 は 0
+    return this.int(DV.getUint32(0, true)).int(DV.getUint32(4, true));
+  }
   nums(arr) { for (let i = 0; i < arr.length; i++) this.num(arr[i]); return this; }
   ints(arr) { for (let i = 0; i < arr.length; i++) this.int(arr[i]); return this; }
   hex() {

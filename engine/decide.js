@@ -8,6 +8,7 @@ import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
 import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 import { seeAll } from './percept.js';
+import { markTouch } from './touchlog.js';
 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
@@ -201,7 +202,7 @@ function kick(m, i, dx, dy, v0, vz, sigAng, sigSpd, tg) {
   const v = v0 * (1 + normal4(seed, t, i, tg + 1) * sigSpd);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = vz;
   F[F_B + 6] = bx; F[F_B + 7] = by;
-  N[I.OWN] = -1; N[I.LAST] = i; N[I.KICKT] = m.t; m.cd[i] = 10; m.act[i] = ACT.HOME; m.tmr[i] = 0;
+  N[I.OWN] = -1; markTouch(m, i, m.t); N[I.KICKT] = m.t; m.cd[i] = 10; m.act[i] = ACT.HOME; m.tmr[i] = 0;
 }
 
 // ボールを持っている選手 i が次の行動を決めて実行する

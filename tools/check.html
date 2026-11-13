@@ -42,6 +42,10 @@ document.getElementById('run').onclick = async () => {
     }
     if (now.engine !== gold.engine) { bad++; log(`エンジン版が違う（この端末 ${now.engine} / 基準 ${gold.engine}）`, 'ng'); }
     log(`${bad ? '不一致あり' : '全部一致'}　${sec.toFixed(1)} 秒（${GOLDEN_SPEC.seeds.length} 組）`, bad ? 'ng' : 'ok');
+    // 起動時に走らせる自己診断（短い試合1つ。アプリは起動時にこれを呼ぶ）
+    const { selfCheck } = await import('../engine/selfcheck.js');
+    const t1 = performance.now(), sc = selfCheck(), ms = performance.now() - t1;
+    log(`自己診断: ${sc.ok ? 'PASS' : 'FAIL（この端末 ' + sc.got + ' / 基準 ' + sc.expected + '）'}　${ms.toFixed(0)} ミリ秒`, sc.ok ? 'ok' : 'ng');
   } catch (e) {
     log('エラー: ' + e, 'ng');
   }

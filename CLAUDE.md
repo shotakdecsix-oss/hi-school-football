@@ -23,6 +23,10 @@ engine/（試合エンジン・純粋JS）/ sim/（週進行など）/ data/ / u
 - 組み立て（`build`。-1 つなぐ〜+1 蹴る）は decide.js のパス・クリアの価値に効く（`atkParams` の `longPen/longBon/shortB/backB/clrK/clrLoss/gkFx/reliefK`。0 で従来と同じ）。型（標準・保持・直接）は `data/styles.js`、型ごとの狙いの数字と測定は `tools/style.js`（`npm run style`。90分×48試合×3種で約5分。型を変えたら外れた項目が無いか見る）。
 - 切り替えの指示（失った直後・奪った直後）は、ボールを持つチームが替わった tick（`N[I.CHGT]`）から数秒の「窓」の間だけ効く。窓は takeControl のときだけ開く（再開・キックオフでは開かない）。
 - 認知（`engine/percept.js`。視野・体の向き・気づき・味方の記憶）は既定でオン。入力 `percept: 0` で外せる（比較用。基準値にも残す）。認知ありのときだけ F の後ろに `F_FACE`・`F_SCN`、N の後ろに味方を最後に見た tick（`N_LS`）を確保する。判断は `seeAll(m, i, full)` の見え方 `aw`（味方は「いま扇の中・近く10m」か「3秒以内に見た」ときだけ候補に入る。再開の最初のプレー（`full`）は全員分かる。見えていない相手は 4 割だけ数える）を使う。ボールを持つ選手は扇が 0.8 倍。見えていない側から寄せられるとタックルに弱い（`blindOf`）。
+- 入力は `createMatch` で複製される。試合中の指示変更は `setTactics(m,k,tactics)` が `m.input.changes` に `{t,k,type:'tac',tactics}` として足す（試合の記録 = 最初の入力 + changes。適用済みの数は `N[I.TACI]`。復元で `m.tac` も作り直す）。
+- ボールに触れる処理は `N[I.LAST]` を直接書かず `markTouch(m,p,t)`（`engine/touchlog.js`）を使う（得点者・アシストの判定に要る）。ゴールの記録は `[t, EV.GOAL, 得点側, 得点者, アシスト(-1=なし), オウンゴール(0/1)]`。
+- チェック値（`Digest`）は全ビット。実機の自己診断は `selfCheck()`（`engine/selfcheck.js`）で、基準 `data/selfcheck.js` は `npm run golden` が書く（手で編集しない）。`tools/check.html` にも出る。
+- ボールの予測（`brain.js` の `predictBall`）: 空中のボールは `stepBall` を同じ刻みで進め、転がりは式で先まで求める。選手が走れる時間は「いまから先の s×0.25 秒」だけ（経過時間を足さない）。
 - engine/ から render/・ui/・tools/・sim/ を import しない。
 
 ## テスト

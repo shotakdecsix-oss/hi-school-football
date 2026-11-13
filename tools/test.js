@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
-import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf, frame } from '../engine/match.js';
+import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf, frame, setTactics } from '../engine/match.js';
+import { predictBall } from '../engine/brain.js';
+import { markTouch, goalCredit } from '../engine/touchlog.js';
+import { selfCheck } from '../engine/selfcheck.js';
+import { Digest } from '../engine/core/digest.js';
 import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, NEVER_SEEN, BALL_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, N_LEN, NEVER_SEEN, BALL_R, PRED_N, PRED_TICKS, DT, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
 import { decide } from '../engine/decide.js';
 import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
@@ -441,7 +445,8 @@ await test('tactics: 守備の指示が陣形に効く（ライン高さ・コ�
   const S = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; // 横幅の差は約 2m と小さく、6試合ではぶれるので 12試合で見る
   const base = blockStats({}, S), hi = blockStats({ line: 1 }, S), lo = blockStats({ line: -1 }, S);
   const cp = blockStats({ compact: 1 }, S), lp = blockStats({ compact: -1 }, S), wait = blockStats({ pressZone: -1 }, S);
-  const pp = blockStats({ pressPower: 1 }, S), pm = blockStats({ pressPower: -1 }, S);
+  const S30 = Array.from({ length: 30 }, (_, i) => i + 1); // v14: タックルの回数は数十回でぶれるので（12試合では差がほぼ消えた）、プレス強度だけ30試合で見る（40試合の測定では 弱166・標準252・強277 回）
+  const pp = blockStats({ pressPower: 1 }, S30), pm = blockStats({ pressPower: -1 }, S30);
   const f = (x) => x.toFixed(1);
   assert.ok(hi.line > base.line + 5, `ラインが高い: ${f(hi.line)} (標準 ${f(base.line)})`);
   assert.ok(lo.line < base.line - 3, `ラインが低い: ${f(lo.line)} (標準 ${f(base.line)})`);
@@ -535,14 +540,15 @@ function atkStats(tac, seeds = [1, 2, 3, 4, 5, 6, 7, 8], minutes = 10) {
 }
 await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク）が配置と判断に効く', () => {
   const S = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  const b = atkStats({}, S), W1 = atkStats({ width: 1 }, S), W0 = atkStats({ width: -1 }, S), T1 = atkStats({ tempo: 1 }, S), T0 = atkStats({ tempo: -1 }, S);
+  const S30 = Array.from({ length: 30 }, (_, i) => i + 1); // v14: テンポは前向きのパスの割合の差が小さい（30試合の測定で 遅33%・標準36%・速39%）ので、30試合で見る
+  const b = atkStats({}, S), W1 = atkStats({ width: 1 }, S), W0 = atkStats({ width: -1 }, S), b3 = atkStats({}, S30), T1 = atkStats({ tempo: 1 }, S30), T0 = atkStats({ tempo: -1 }, S30);
   const A1 = atkStats({ attack: 1 }, S), A0 = atkStats({ attack: -1 }, S), R1 = atkStats({ risk: 1 }, S), R0 = atkStats({ risk: -1 }, S);
   const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
   assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
   assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
   assert.ok(W1.hs > b.hs + 0.01, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`); // 30試合で測ると +4〜5pt（認知なしは +6pt）。10試合ではばらつくので、向きだけ見る
   // テンポ: 40試合で測ると、持ち時間 -0.39 秒（速）、パス本数 速 +27%・遅 -11%。10試合では遅の差が -6〜-15% とぶれるので、向きと下限（-5%）だけ見る
-  assert.ok(T1.hold < b.hold - 0.2 && T0.pass < b.pass * 0.95, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b.pass)}（10分あたり）`);
+  assert.ok(T1.hold < b3.hold - 0.2 && T0.pass < b3.pass * 0.95, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b3.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b3.pass)}（10分あたり）`);
   assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
   assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
   assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.4, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
@@ -909,6 +915,113 @@ await test('lint: engine/ に決定性を壊す記述（Math.sin/pow/random、**
   assert.deepEqual(bad, []);
   return files.length + ' ファイルを検査';
 });
+
+// ── v14: 予測・指示変更の記録・得点者とアシスト・チェック値・自己診断（エンジンのレビューで見つかった土台の直し）──
+await test('predict: ボールの軌道の予測が実際の物理と合う（浮き球の落下点・転がり）。蹴ってから時間が経っても、最初の点に届く人が増えない', () => {
+  const cases = { 'ロブ 20m/s': [-10, 5, 0.3, 20, -3, 8], 'クリア 30m/s': [-30, 0, 0.3, 28, 6, 13], 'グラウンダー 15m/s': [-20, 0, BALL_R, 15, 2, 0], '浮き球 14m/s': [0, -10, 0.3, 8, 11, 6] };
+  const notes = [];
+  for (const [nm, b] of Object.entries(cases)) {
+    const m = mk(3);
+    for (let q = 0; q < 6; q++) m.F[F_B + q] = b[q];
+    m.N[I.OWN] = -1; m.N[I.RECV] = -1; m.N[I.KICKT] = m.t;
+    predictBall(m);
+    const A = Float64Array.from(b);
+    let md = 0, mz = 0;
+    for (let s = 1; s <= PRED_N; s++) {
+      for (let q = 0; q < PRED_TICKS; q++) stepBall(A, 0, DT);
+      const cx = Math.max(-HL, Math.min(HL, A[0])), cy = Math.max(-HW, Math.min(HW, A[1]));
+      md = Math.max(md, Math.hypot(m.bpx[s] - cx, m.bpy[s] - cy)); mz = Math.max(mz, Math.abs(m.bpz[s] - A[2]));
+    }
+    assert.ok(md < 0.3, `${nm}: 位置のずれ ${md.toFixed(2)}m（v13は浮き球で 5〜12m 手前だった）`);
+    assert.ok(mz < 0.05, `${nm}: 高さのずれ ${mz.toFixed(2)}m`);
+    notes.push(md.toFixed(2));
+  }
+  const m = mk(3); // ゆっくり転がるボール。蹴ってから4秒たっても、0.25秒後の点に届く人は（近くにいない限り）いない
+  m.F[F_B] = 0; m.F[F_B + 1] = 0; m.F[F_B + 2] = BALL_R; m.F[F_B + 3] = 4; m.F[F_B + 4] = 0; m.F[F_B + 5] = 0;
+  m.N[I.OWN] = -1; m.N[I.RECV] = -1; m.N[I.KICKT] = m.t - 80;
+  predictBall(m);
+  let n = 0;
+  for (let i = 0; i < NP; i++) if (m.icT[i] <= 0.25) n++;
+  assert.ok(n <= 2, `最初の点に届く人 ${n}人（v13は経過時間を足していたので約9人）`);
+  return `位置のずれ(m) ${notes.join('/')}・経過4秒で最初の点に届く人 ${n}`;
+});
+
+await test('tactics: 試合中の指示変更は入力に記録される。記録から再生しても、途中の保存から復元しても、通しと一致する。呼び出し側の入力は複製される', () => {
+  const END = 7200, run2 = (m, to) => { while (m.t < to && stepMatch(m)); };
+  const inp = sampleInput(5, { rules: { half: 3, et: 0, pk: false, ko: false } });
+  const a = createMatch(inp);
+  run2(a, 2400); setTactics(a, 0, { press: 1, tempo: 1, line: 1 });
+  run2(a, 4800); const snap = snapshot(a); setTactics(a, 1, { build: -1, risk: -1 });
+  run2(a, END);
+  const D = digestMatch(a);
+  assert.equal(a.input.changes.length, 2, '指示変更が2件、入力に記録されている');
+  assert.equal(a.N[I.TACI], 2);
+  const b = createMatch(a.input); run2(b, END);
+  assert.equal(digestMatch(b), D, '記録（最初の入力＋変更）から再生した結果が通しと一致する');
+  const c = createMatch(a.input); restore(c, snap); run2(c, END);
+  assert.equal(digestMatch(c), D, '途中（指示変更の間）の保存から、新しい試合へ復元して再開しても一致する');
+  const d = createMatch(a.input); run2(d, 1200); const s2 = snapshot(d); run2(d, END);
+  const e = createMatch(a.input); restore(e, s2); run2(e, END);
+  assert.equal(digestMatch(e), digestMatch(d), '最初の指示変更より前の保存から復元しても一致する');
+  assert.equal(digestMatch(d), D);
+  const n0 = createMatch(inp); run2(n0, END);
+  assert.notEqual(digestMatch(n0), D, '指示変更が効いている（変えなかった試合と結果が違う）');
+  // 呼び出し側があとで入力を書き換えても、作った試合には影響しない
+  const inp2 = sampleInput(5, { rules: { half: 3, et: 0, pk: false, ko: false } }), f = createMatch(inp2);
+  inp2.teams[0].players[3].ab = 1; inp2.teams[0].tactics = { press: -1 };
+  const g = createMatch(sampleInput(5, { rules: { half: 3, et: 0, pk: false, ko: false } }));
+  run2(f, 3000); run2(g, 3000);
+  assert.equal(digestMatch(f), digestMatch(g));
+  // 入力に最初から書いた指示変更は、setTactics と同じ結果になる
+  const h = createMatch(sampleInput(5, { rules: { half: 3, et: 0, pk: false, ko: false }, changes: [{ t: 2400, k: 0, type: 'tac', tactics: { press: 1, tempo: 1, line: 1 } }, { t: 4800, k: 1, type: 'tac', tactics: { build: -1, risk: -1 } }] }));
+  run2(h, END);
+  assert.equal(digestMatch(h), D, '入力に書いた指示変更と setTactics は同じ');
+});
+
+await test('goals: 得点者とアシストの記録（触れた順・間に相手が触れたら切れる・10秒まで・はじかれて入ったら撃った選手・オウンゴール）', () => {
+  const mkm = () => { const team = new Uint8Array(22); for (let i = 11; i < 22; i++) team[i] = 1; const N = new Int32Array(N_LEN); for (let k = 0; k < 2; k++) { N[I.T1 + k] = -1; N[I.T2 + k] = -1; N[I.T1T + k] = -1000000; N[I.T2T + k] = -1000000; } N[I.LAST] = -1; return { N, team }; };
+  let m = mkm(); markTouch(m, 3, 100); markTouch(m, 5, 120);
+  assert.deepEqual(goalCredit(m, 0, 140), [5, 3, 0], '3→5→ゴール: 得点者5・アシスト3');
+  m = mkm(); markTouch(m, 3, 100); markTouch(m, 15, 110); markTouch(m, 5, 120);
+  assert.deepEqual(goalCredit(m, 0, 140), [5, -1, 0], '間に相手が触れたら、アシストなし');
+  m = mkm(); markTouch(m, 3, 100); markTouch(m, 5, 400);
+  assert.deepEqual(goalCredit(m, 0, 410), [5, -1, 0], '10秒より前の接触はアシストにしない');
+  m = mkm(); markTouch(m, 3, 100); markTouch(m, 5, 120); markTouch(m, 11, 125); // 撃った → GK（相手）がはじいて入った
+  assert.deepEqual(goalCredit(m, 0, 140), [5, 3, 0], 'はじかれて入った得点は、撃った選手（GKの得点にしない）');
+  m = mkm(); markTouch(m, 5, 120); markTouch(m, 14, 500);
+  assert.deepEqual(goalCredit(m, 0, 510), [14, -1, 1], '直前に守る側が触れ、攻める側の接触が3秒より前なら、オウンゴール');
+  m = mkm(); markTouch(m, 5, 100); markTouch(m, 5, 120); markTouch(m, 15, 130); markTouch(m, 5, 140);
+  assert.deepEqual(goalCredit(m, 0, 150), [5, -1, 0], '同じ選手が続けて触れても、間に相手が触れていればアシストなし');
+  // 実際の試合の記録: 得点者は得点側の選手（オウンゴールを除く）、アシストは同じチームの別の選手
+  let goals = 0, assists = 0;
+  for (let seed = 1; seed <= 8; seed++) {
+    const mm = mk(seed, { rules: { half: 15, et: 0, pk: false, ko: false } }); run(mm);
+    for (const e of mm.log) if (e[1] === EV.GOAL) {
+      const [, , k, sc, as, og] = e; goals++;
+      assert.equal(e.length, 6);
+      if (!og) assert.equal(Math.floor(sc / 11), k, '得点者は得点したチームの選手');
+      if (as >= 0) { assists++; assert.equal(Math.floor(as / 11), k, 'アシストは同じチーム'); assert.notEqual(as, sc); }
+    }
+  }
+  return `8試合×30分: ゴール ${goals}・アシストあり ${assists}`;
+});
+
+await test('digest: チェック値は全ビット（小さな差も見える。-0 と 0・NaN は同じ扱い）', () => {
+  const h = (v) => new Digest().num(v).hex();
+  assert.notEqual(h(1), h(1 + 1e-12), '1e-12 の差も別の値になる（v13は 1/1024 に丸めていた）');
+  assert.notEqual(h(0.5), h(0.5 + Number.EPSILON));
+  assert.equal(h(-0), h(0));
+  assert.equal(h(NaN), h(NaN));
+  assert.notEqual(h(1), h(2));
+  assert.equal(new Digest().nums([1.5, -2.25]).hex(), new Digest().num(1.5).num(-2.25).hex());
+});
+
+await test('selfcheck: 実機の自己診断の基準（data/selfcheck.js）と一致', () => {
+  const r = selfCheck();
+  assert.ok(r.ok, `自己診断が基準と違う（${r.got} / ${r.expected}、エンジン版 ${r.engine} / ${r.expectedEngine}）。エンジンを意図して変えたなら npm run golden`);
+  return r.got;
+});
+
 
 // ── 基準値（端末間の一致確認と同じもの）──
 await test('golden: 基準値（tools/golden.json）と一致', async () => {

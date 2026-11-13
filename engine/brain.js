@@ -2,17 +2,18 @@
 // 役割は N（N_ACT=役割、N_TGT=相手、N_TMR=タイマー）、目標は F（tx,ty,pc）に持つので、保存と復元ができる。
 // 役割の割り当ては8tickごと（状況が変わったときはすぐ）、目標の更新は毎tick。
 import {
-  NP, DT, HL, HW, GOAL_HW, BALL_R, PA_D, PA_HW, PHASE, NEXT, SP, F_B, F_R, F_PASS, F_SB, I, ACT, ST, ST_N, EV, PRED_N, dirOf,
+  NP, DT, HL, HW, GOAL_HW, BALL_R, PA_D, PA_HW, PHASE, NEXT, SP, F_B, F_R, F_PASS, F_SB, I, ACT, ST, ST_N, EV, PRED_N, PRED_TICKS, PRED_DT, dirOf,
 } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
-import { BALL_EV } from './ball.js';
+import { BALL_EV, stepBall } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 import { lagOf, blindOf } from './percept.js';
+import { markTouch } from './touchlog.js';
 
 const BLIND = 3.5; // 認知: 気づいていない相手のタックルは、能力の差にこれだけ（能力の点数で）上乗せされる
 
@@ -36,14 +37,27 @@ function tcOf(m, k) {
 }
 
 // 自由なボールの軌道を0.25秒刻みで予測し、各選手が触れる最も早い時刻と場所を求める
-function predictBall(m) {
-  const { F, N, px, py, vmax, acc, ab, team, bpx, bpy, bpz, icT, icX, icY } = m;
-  const x0 = F[F_B], y0 = F[F_B + 1], z0 = F[F_B + 2], vx0 = F[F_B + 3], vy0 = F[F_B + 4], vz0 = F[F_B + 5];
-  for (let s = 1; s <= PRED_N; s++) {
-    const tt = s * 0.25, g = (1 - exp(-K_ROLL * tt)) / K_ROLL, z = z0 + vz0 * tt - 4.9 * tt * tt;
-    bpx[s] = clamp(x0 + vx0 * g, -HL, HL); bpy[s] = clamp(y0 + vy0 * g, -HW, HW); bpz[s] = z < BALL_R ? BALL_R : z;
+// 空中のボール（浮き球・バウンド中）は、実際のボール物理（ball.js の stepBall）を同じ刻み（1tick）で進めて求める。空気抵抗・バウンドが実際と同じになる
+// （v13までは転がり抵抗の式で空中も予測していて、浮き球の落下点が22〜24%手前になっていた）。地面を転がり始めたら、転がり抵抗の式で先まで一気に求める。誰かに先に触られることは考えない
+export function predictBall(m) {
+  const { F, N, px, py, vmax, acc, ab, team, bpx, bpy, bpz, bpb, icT, icX, icY } = m;
+  for (let q = 0; q < 6; q++) bpb[q] = F[F_B + q];
+  let s = 1;
+  while (s <= PRED_N && !(bpb[2] <= BALL_R + 1e-9 && bpb[5] <= 0)) {
+    let dead = false; // ラインを越えたら、そこで止まったとみなす
+    for (let q = 0; q < PRED_TICKS; q++) if (stepBall(bpb, 0, DT) !== BALL_EV.NONE) { dead = true; break; }
+    bpx[s] = clamp(bpb[0], -HL, HL); bpy[s] = clamp(bpb[1], -HW, HW); bpz[s] = bpb[2]; s++;
+    if (dead) for (; s <= PRED_N; s++) { bpx[s] = bpx[s - 1]; bpy[s] = bpy[s - 1]; bpz[s] = bpz[s - 1]; }
+  }
+  if (s <= PRED_N) { // 転がっている: 位置 = いまの位置 + 速度 × (1 − e^(−K·t)) / K
+    const x1 = bpb[0], y1 = bpb[1], vx1 = bpb[3], vy1 = bpb[4];
+    for (let s0 = s; s <= PRED_N; s++) {
+      const tt = (s - s0 + 1) * PRED_DT, g = (1 - exp(-K_ROLL * tt)) / K_ROLL;
+      bpx[s] = clamp(x1 + vx1 * g, -HL, HL); bpy[s] = clamp(y1 + vy1 * g, -HW, HW); bpz[s] = BALL_R;
+    }
   }
   // 触れる時刻 = 反応の遅れ + 走る時間（加速を考える）。パスを出した側は動きを知っているので遅れが小さい。
+  // 反応し終えた選手の「いまの位置」は、走った結果をすでに含む。走れる時間は、いまから先の s×0.25 秒だけ（v13までは経過時間を足していた）
   const el = (m.t - N[I.KICKT]) * DT, pk = N[I.RECV] >= 0 ? N[I.PASSK] : -1;
   for (let i = 0; i < NP; i++) {
     icT[i] = 99;
@@ -52,7 +66,7 @@ function predictBall(m) {
     for (let s = 1; s <= PRED_N; s++) {
       if (bpz[s] > 1.8) continue;
       const dx = bpx[s] - px[i], dy = bpy[s] - py[i];
-      if (timeToCover(Math.sqrt(dx * dx + dy * dy) - R_CTRL, vmax[i], acc[i]) <= s * 0.25 - Math.min(0, rs)) { icT[i] = s * 0.25; icX[i] = bpx[s]; icY[i] = bpy[s]; break; }
+      if (timeToCover(Math.sqrt(dx * dx + dy * dy) - R_CTRL, vmax[i], acc[i]) <= s * PRED_DT) { icT[i] = s * PRED_DT; icX[i] = bpx[s]; icY[i] = bpy[s]; break; }
     }
   }
 }
@@ -585,7 +599,7 @@ export function carryBall(m) {
       const room = rollRoom(gx, gy, ca, sa); // ライン際では、ほとんどの場合ボールを外へ出さずに収める（止まるまでの距離がラインの内側に収まる強さに抑える）
       if (v / K_ROLL > room && f4(seed, t, o, 70) < 0.8) { v = K_ROLL * room; if (v < sp + 1) return BALL_EV.NONE; }
       F[F_B + 3] = ca * v; F[F_B + 4] = sa * v; F[F_B + 5] = 0;
-      N[I.OWN] = -1; N[I.LAST] = o; N[I.KICKT] = t; N[I.PASSK] = -1; N[I.RECV] = -1; cd[o] = 6;
+      N[I.OWN] = -1; markTouch(m, o, t); N[I.KICKT] = t; N[I.PASSK] = -1; N[I.RECV] = -1; cd[o] = 6;
       N[I.ST + k * ST_N + ST.HEAVY]++;
     }
   }
@@ -598,7 +612,7 @@ export function takeControl(m, p) {
   const k = team[p], pk = N[I.PASSK];
   if (pk >= 0) N[I.ST + k * ST_N + (pk === k ? ST.PASSOK : ST.ICPT)]++; // パス成功か、相手に奪われたか
   if (N[I.POSS] !== k) N[I.CHGT] = m.t; // ボールを持つチームが入れ替わった（切り替えの窓の起点）
-  N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; N[I.LAST] = p; N[I.RECV] = -1; N[I.SHOTK] = -1; N[I.GOT] = m.t;
+  N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; markTouch(m, p, m.t); N[I.RECV] = -1; N[I.SHOTK] = -1; N[I.GOT] = m.t;
   act[p] = ACT.CARRY; tgt[p] = -1;
   if (N[I.SETP] > 0) { tmr[p] = 14; tx[p] = px[p]; ty[p] = py[p]; pc[p] = 0; } // 再開: その場で少し周りを見てから蹴る
   else {
@@ -620,7 +634,7 @@ function keeperTouch(m, p, vb) {
   if (vb <= lim && F[F_B + 2] < 2.4) { takeControl(m, p); return; }
   const a = atan2(0, dir) + normal4(seed, t, p, 63) * 0.9, v = 2 + 0.4 * vb; // フィールドの側へ、ばらつきながらはじく
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;
-  N[I.LAST] = p; N[I.KICKT] = t; m.cd[p] = 8; N[I.PASSK] = -1; N[I.RECV] = -1;
+  markTouch(m, p, t); N[I.KICKT] = t; m.cd[p] = 8; N[I.PASSK] = -1; N[I.RECV] = -1;
 }
 
 // 選手 p が自由なボールに触れた: 速すぎる・圧力が強いと、ファーストタッチが乱れてボールが弾む
@@ -634,7 +648,7 @@ function onTouch(m, p) {
   if (q >= 0) { takeControl(m, p); return; }
   const a = atan2(F[F_B + 4], F[F_B + 3]) + normal4(seed, t, p, 61), v = Math.max(2, vb * 0.45);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;
-  N[I.LAST] = p; N[I.KICKT] = t; m.cd[p] = 8; N[I.PASSK] = -1; N[I.RECV] = -1;
+  markTouch(m, p, t); N[I.KICKT] = t; m.cd[p] = 8; N[I.PASSK] = -1; N[I.RECV] = -1;
   N[I.ST + k * ST_N + ST.MISC]++;
 }
 
@@ -686,7 +700,7 @@ function tackles(m, o) {
   const a = atan2(by - py[j], bx - px[j]) + normal4(seed, t, j, 65) * 0.6, v = 2.5 + 0.1 * ab[B + AB.TCK];
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 0;
   F[F_B + 6] = bx; F[F_B + 7] = by;
-  N[I.OWN] = -1; N[I.LAST] = j; N[I.KICKT] = t; cd[j] = 4;
+  N[I.OWN] = -1; markTouch(m, j, t); N[I.KICKT] = t; cd[j] = 4;
 }
 
 export function touches(m) {

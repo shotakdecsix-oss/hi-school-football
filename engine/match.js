@@ -20,6 +20,7 @@ import { setLook, initLook, look, refreshFace, seeAt, senseAt, memOf, fovOf, NEA
 export { staminaOf } from './stamina.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
+import { goalCredit } from './touchlog.js';
 
 // input = { seed, teams: [ { formation, tactics, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
 // players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。bench は控え（省略可）。
@@ -27,7 +28,24 @@ import { clamp } from './core/math.js';
 // rules は大会ごとの規定（data/rules.js。省略 = リーグ戦の90分）。
 // changes = [ { t, k, type: 'sub', slot, bench } ... ]: t(tick)以降の最初の中断（ボールが出た・ゴールのあと）かハーフタイムで、
 // チームkのスロット slot の選手を bench 番目の控えに替える。規定の人数・回数を超える交代、出場済みの控えは実行されない（記録の最後が 0）。
-export function createMatch(input) {
+//   { t, k, type: 'tac', tactics }: t(tick)からチームkのチーム指示を tactics に替える（試合中の指示変更）。setTactics が、いまの tick で m.input.changes に足す。
+// 入力は createMatch で複製する（呼び出し側があとで書き換えても、この試合には影響しない）。試合の記録 = 最初の入力 + m.input.changes（指示変更が足されていく）。
+// 種類 type の変更を、t の順（同じ t は入力の順）に並べる
+function sortedChanges(changes, type) {
+  return changes.filter((c) => c.type === type).map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]);
+}
+
+// 入力の複製（配列・数値配列・オブジェクト。あとから呼び出し側が書き換えても、復元で能力が変わったりしないように）
+function cloneInput(v) {
+  if (Array.isArray(v)) return v.map(cloneInput);
+  if (ArrayBuffer.isView(v)) return Array.from(v);
+  if (v !== null && typeof v === 'object') { const o = {}; for (const key of Object.keys(v)) o[key] = cloneInput(v[key]); return o; }
+  return v;
+}
+
+export function createMatch(inp) {
+  const input = cloneInput(inp);
+  if (!input.changes) input.changes = [];
   const pOn = input.percept === undefined || input.percept ? 1 : 0; // 認知（向き・視野・気づき。engine/percept.js）。既定はあり。input.percept = 0 のときだけ、全員が全部見えている従来の動き
   const F = new Float64Array(pOn ? F_LEN_P : F_LEN), N = new Int32Array(pOn ? N_LEN_P : N_LEN);
   if (pOn) N.fill(NEVER_SEEN, N_LS);
@@ -47,13 +65,14 @@ export function createMatch(input) {
     cIn: new Float64Array(NP), cOut: new Float64Array(NP), cInH: new Float64Array(NP), cOutH: new Float64Array(NP), wTurn: new Float64Array(NP), tLag: new Float64Array(NP), rScan: new Float64Array(NP), fov: new Float64Array(NP), // 認知: 視野の内側・外側の cos、向きを変える速さ、気づくまでの遅れ、気づきの上がる速さ、視野の半角（rad）（能力から決まる）
     fcx: new Float64Array(NP), fcy: new Float64Array(NP), aw: new Float64Array(NP), // 認知: 向きの cos/sin（毎tick作り直す）、判断のたびに作る見えている度合い（作業用）
     tac: [tacParams(input.teams[0].tactics), tacParams(input.teams[1].tactics)], // チーム指示から作った数値（engine/tactic.js）
-    changes: (input.changes || []).filter((c) => c.type === 'sub').map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]), // 交代（t の順。入力から決まる値）
+    changes: sortedChanges(input.changes, 'sub'), // 交代（t の順。入力から決まる値）
+    tchg: sortedChanges(input.changes, 'tac'), // 試合中の指示変更（t の順。入力から決まる値）
     nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
     ord: new Int16Array(NP), done: new Uint8Array(NP), // 追従の計算用（作業用）
     rest: new Int8Array(NP).fill(-1), // 攻撃中に後ろへ残す優先順（CB以外の外野手を持ち場の深い順に 0,1,2…。CB・GK は -1）。リスクの指示で、先頭から何人を残すかが決まる（入力から決まる値）
     // 毎tick作り直す作業用（状態ではない）
     hx: new Float64Array(NP), hy: new Float64Array(NP), icT: new Float64Array(NP), icX: new Float64Array(NP), icY: new Float64Array(NP),
-    bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1),
+    bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1), bpb: new Float64Array(6),
     pa: new Uint8Array(NP), mpi: new Int16Array(128), mpo: new Int16Array(128), mpd: new Float64Array(128), usedO: new Uint8Array(NP),
   };
   for (let i = 0; i < NP; i++) F[F_STA + i] = 1; // 全員が万全で始まる
@@ -94,16 +113,39 @@ export function createMatch(input) {
   for (let i = 0; i < NP; i++) N[I.OCC + i] = -1; // 全員が先発
   N[I.LAST] = -1;
   N[I.CHGT] = NO_CHG;
+  resetTouches(N);
   N[I.HALF] = 1;
   placeKickoff(m, 0);
   return m;
 }
 
-// チーム k の指示を替える（いまの試合の続きから効く）。状態は変わらないが、入力も変わるので、この変更は記録に残らない。
-// 再現できる形で変えるなら、同じ tick に同じ指示を入れ直すこと（試合中の指示変更を入力に入れるのは後の段階）。
+// チーム k の指示を、いまの tick から tactics に替える。入力（m.input.changes）に記録するので、記録を最初の入力と合わせれば再現できる。
+// 同じ tick の指示変更は、足した順に効く。
 export function setTactics(m, k, tactics) {
-  m.input.teams[k].tactics = tactics;
-  m.tac[k] = tacParams(tactics);
+  const ch = { t: m.t, k, type: 'tac', tactics: cloneInput(tactics) };
+  m.input.changes.push(ch);
+  let p = m.N[I.TACI];
+  while (p < m.tchg.length && m.tchg[p].t <= m.t) p++; // 入力の順で並べ直したときと同じ位置（同じ t の最後）
+  m.tchg.splice(p, 0, ch);
+  applyTactics(m);
+}
+
+// 時刻が来ている指示変更を効かせる（毎 tick の最初）
+function applyTactics(m) {
+  const { N, tchg } = m;
+  while (N[I.TACI] < tchg.length && tchg[N[I.TACI]].t <= m.t) { const c = tchg[N[I.TACI]++]; m.tac[c.k] = tacParams(c.tactics); }
+}
+
+// 状態 N の指示変更の番号に合わせて、チーム指示の数値を作り直す（復元のあとに必要）
+function refreshTactics(m) {
+  const T = m.input.teams;
+  m.tac[0] = tacParams(T[0].tactics); m.tac[1] = tacParams(T[1].tactics);
+  for (let u = 0; u < m.N[I.TACI]; u++) m.tac[m.tchg[u].k] = tacParams(m.tchg[u].tactics);
+}
+
+// ボールに触れた選手の記録を空にする（キックオフのとき）
+function resetTouches(N) {
+  for (let k = 0; k < 2; k++) { N[I.T1 + k] = -1; N[I.T2 + k] = -1; N[I.T1T + k] = NO_CHG; N[I.T2T + k] = NO_CHG; }
 }
 
 // 選手 i（チーム内の位置は固定）に、能力 ab の選手を入れる（入力から決まる値を作り直す）
@@ -154,6 +196,7 @@ const NO_CHG = -1000000; // 切り替えの窓がない（直近に奪い合い�
 
 function placeKickoff(m, kteam) {
   const { F, N, px, py, vx, vy, tx, ty, pc, team, fd, fl, cd, act, tgt, tmr } = m;
+  resetTouches(N);
   for (let i = 0; i < NP; i++) {
     const dir = dirOf(N, team[i]), d = Math.min(fd[i], 0.47);
     px[i] = tx[i] = dir * (d * 2 * HL - HL);
@@ -219,7 +262,7 @@ function onBallEvent(m, ev) {
   if (ev === BALL_EV.GOAL_PX || ev === BALL_EV.GOAL_NX) {
     const k = dirOf(N, 0) === (ev === BALL_EV.GOAL_PX ? 1 : -1) ? 0 : 1; // その向きに攻めているチームの得点
     N[I.SCORE + k]++;
-    m.log.push([m.t, EV.GOAL, k, N[I.LAST]]);
+    m.log.push([m.t, EV.GOAL, k, ...goalCredit(m, k, m.t)]); // 得点したチーム、得点者、アシスト、オウンゴール
     pause(m, GOAL_WAIT, NEXT.KICKOFF, 1 - k);
     return;
   }
@@ -245,6 +288,7 @@ export function stepMatch(m) {
   const { F, N } = m, ph = N[I.PHASE];
   if (ph === PHASE.END) return false;
   if (ph === PHASE.PK) { stepPK(m); m.t++; return true; }
+  applyTactics(m);
   think(m);
   movePlayers(m);
   tire(m);
@@ -314,6 +358,7 @@ export function snapshot(m) {
 export function restore(m, s) {
   m.t = s.t; m.F.set(s.F); m.N.set(s.N); m.log = s.log.map((e) => e.slice());
   refreshOccupants(m); // 交代があったあとの能力などを作り直す
+  refreshTactics(m); // 指示変更があったあとのチーム指示の数値を作り直す
   if (m.pOn) refreshFace(m);
 }
 export function snapshotToJSON(s) {

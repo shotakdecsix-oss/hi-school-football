@@ -4,9 +4,10 @@
 import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP, PHASE, dirOf } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
-import { normal4 } from './core/rng.js';
+import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
 import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { seeAll } from './percept.js';
 
 const LOSS_W = 0.75; // ボールを失ったとき、相手がそこから得る価値の重み
 const KEEP = 0.008; // ボールを持ち続けること自体の価値（失うと同じ分を失う）
@@ -75,12 +76,13 @@ export function winMode(m, k) {
 }
 
 // 点 (x,y) の周りの、相手チームの圧力（6m以内の相手の近さの合計。最大1.5）
-export function pressureAt(m, x, y, k) {
+// aw（認知。選手ごとの見えている度合い）があれば、見えている相手だけが圧力に入る。省略は全員が見えている
+export function pressureAt(m, x, y, k, aw) {
   const { px, py } = m, j0 = (1 - k) * 11;
   let p = 0;
   for (let j = j0; j < j0 + 11; j++) {
     const dx = px[j] - x, dy = py[j] - y, d2 = dx * dx + dy * dy;
-    if (d2 < 36) p += 1 - Math.sqrt(d2) / 6;
+    if (d2 < 36) p += (aw ? aw[j] : 1) * (1 - Math.sqrt(d2) / 6);
   }
   return p > 1.5 ? 1.5 : p;
 }
@@ -98,7 +100,7 @@ export function offsideLine(m, k) {
 
 // ボールが (x0,y0)→(x1,y1) を初速 v0 で転がる間に、相手に触られずに済む確率。
 // 相手は①今の位置（すぐ近くを通るなら動かなくても触れる）と、②反応するまで走り続けた先の位置から、走って間に合うかで見積もる。
-export function laneSafe(m, k, x0, y0, x1, y1, v0) {
+export function laneSafe(m, k, x0, y0, x1, y1, v0, aw) { // aw: 認知（見えていない相手は、パスコースの危険に入らない）。省略は全員が見えている
   const { px, py, vx, vy, vmax, acc, ab } = m;
   const ex = x1 - x0, ey = y1 - y0, D2 = ex * ex + ey * ey, D = Math.sqrt(D2), o0 = (1 - k) * 11;
   let p = 1;
@@ -127,7 +129,7 @@ export function laneSafe(m, k, x0, y0, x1, y1, v0) {
         r = q < 0 ? 0 : q > 1 ? 1 : q;
       }
     }
-    p *= 1 - 0.9 * r;
+    p *= 1 - 0.9 * r * (aw ? aw[j] : 1);
   }
   return p;
 }
@@ -140,7 +142,7 @@ export function reactTicks(m, p, press) {
 
 // 保持者 i が運ぶ先の候補を全部採点して、cb(価値, 目標x, 目標y, 走る強さ, 距離) に渡す。
 // 価値 = 運んだ先のxt + 相手の圧力が減る分 + 今の勢いを続ける分 − 途中で奪われる危険。hold=true のときは「その場でボールを守る」も候補に入れる。
-export function carryOptions(m, i, press, hold, cb) {
+export function carryOptions(m, i, press, hold, cb, aw) { // aw: 認知（見えている度合い。省略は全員が見えている）
   const { px, py, vx, vy, team, ab, N } = m;
   const k = team[i], dir = dirOf(N, k), A = i * NAB, o0 = (1 - k) * 11;
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir, dri = ab[A + AB.DRI], shtF = 0.4 + 0.06 * ab[A + AB.SHT];
@@ -159,16 +161,18 @@ export function carryOptions(m, i, press, hold, cb) {
         let s = D2 > 1e-6 ? ((qx - x) * ex + (qy - y) * ey) / D2 : 0;
         s = s < 0 ? 0 : s > 1 ? 1 : s;
         const cx = x + ex * s - qx, cy = y + ey * s - qy, d = Math.sqrt(cx * cx + cy * cy);
-        if (d < 4.5) keep *= 1 - clamp(0.55 * (1 - d / 4.5) + 0.03 * (ab[q * NAB + AB.TCK] - dri), 0, 0.75);
+        if (d < 4.5) keep *= 1 - (aw ? aw[q] : 1) * clamp(0.55 * (1 - d / 4.5) + 0.03 * (ab[q * NAB + AB.TCK] - dri), 0, 0.75);
       }
-      const pd = pressureAt(m, dx, dy, k), dist = Math.sqrt(D2);
+      const pd = pressureAt(m, dx, dy, k, aw), dist = Math.sqrt(D2);
       keep *= 1 - 0.08 * (pd > 1 ? 1 : pd);
       const pace = clamp(0.4 + 0.012 * dri + 0.22 * (ux > 0 ? ux : 0) * (1 - 0.4 * pr), 0.4, 0.9);
       if (dist > 0.1) { // 走る間のタッチミスで、半分ほどは奪われる
         const vc = m.vmax[i] * pace;
         keep *= 1 - 0.5 * touchHazard(vc, (press + pd) * 0.5, dri, ab[A + AB.BAL]) * dist / vc;
       }
-      const mom = sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
+      // 今の勢いを続ける価値。認知ありのときは体の向きで見る（止まっていても、向いている方へ運ぶほうが楽。背を向けていると、前へ運ぶには向きを変える手間がかかる）
+      const mom = m.pOn ? MOM * (0.4 + 0.6 * (sp > 5 ? 1 : sp / 5)) * (dist > 0.1 ? (m.fcx[i] * ex + m.fcy[i] * ey) / dist : -1)
+        : sp > 1.5 ? MOM * (sp > 5 ? 1 : sp / 5) * (dist > 0.1 ? (vx[i] * ex + vy[i] * ey) / (sp * dist) : -1) : 0;
       const V = K_DRIB * (keep * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), shtF) + KEEP + RELIEF * (press - pd)) - (1 - keep) * lossV) + mom - (li < 0 ? 0 : CARRY_COST + CARRY_M * dist + tired);
       cb(V, dx, dy, pace, dist);
     }
@@ -178,6 +182,7 @@ export function carryOptions(m, i, press, hold, cb) {
 // ボールを受けた直後: 止まらずに運び出す（相手から離れる・空いた方・今の勢いの向き）。その場で守るほうが良ければ止まる。
 export function startCarry(m, p, press) {
   const { px, py, vx, vy, tx, ty, pc, ab, seed, t } = m, A = p * NAB;
+  const aw = m.pOn ? seeAll(m, p) : null; // 認知: 見えている相手だけで、運ぶ先を選ぶ
   const sig = 0.04 + 0.008 * (20 - (ab[A + AB.DEC] + ab[A + AB.VIS]) / 2);
   let bw = -1e9, n = 0;
   tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5;
@@ -186,7 +191,7 @@ export function startCarry(m, p, press) {
     n++;
     if (w > bw && dist >= 0.1) { bw = w; tx[p] = dx; ty[p] = dy; pc[p] = pace; }
     else if (w > bw) { bw = w; tx[p] = px[p] + vx[p] * 0.3; ty[p] = py[p] + vy[p] * 0.3; pc[p] = 0.5; }
-  });
+  }, aw);
 }
 
 // 蹴る。向きと強さに誤差が乗る。dx,dy=狙い点、v0=水平方向の初速、vz=上向きの初速
@@ -205,6 +210,7 @@ export function decide(m, i) {
   const k = team[i], dir = dirOf(N, k), A = i * NAB, gk = slot[i] === 0, j0 = k * 11, o0 = (1 - k) * 11;
   const sp = N[I.SETP]; // 再開（スローイン・ゴールキック・コーナー）の最初のプレーか。蹴るだけで、運ぶ・撃つ・クリアはしない
   const x = px[i], y = py[i], fx = x * dir, fy = y * dir;
+  const aw = m.pOn ? seeAll(m, i) : null; // 認知: 自分から見て、周りの選手がどれだけ見えているか（オフなら全員が見えている）
   const press = pressureAt(m, x, y, k), line = offsideLine(m, k);
   const sig = 0.04 + 0.008 * (20 - (ab[A + AB.DEC] + ab[A + AB.VIS]) / 2); // 見え方の誤差（点数に対する割合）
   const vis = 10 + 2.5 * ab[A + AB.VIS]; // 見える範囲 (m)
@@ -231,13 +237,13 @@ export function decide(m, i) {
     dx = clamp(dx, -HL + 1.5, HL - 1.5); dy = clamp(dy, -HW + 1.5, HW - 1.5);
     const ex = dx - x, ey = dy - y, D = Math.sqrt(ex * ex + ey * ey);
     if (D < 3 || D > 55 || (sp === SP.THROW && D > 24)) return;
-    const dfx = dx * dir, dfy = dy * dir, pd = pressureAt(m, dx, dy, k);
+    const dfx = dx * dir, dfy = dy * dir, pd = pressureAt(m, dx, dy, k, aw);
     const air = sp === SP.CORNER && D > 8; // コーナーは浮き球でゴール前へ
     let p;
     if (D <= 26 && !air) {
       const g = groundPass(D, rollRoom(dx, dy, ex / D, ey / D));
       if (g.v0 > 18 + 0.9 * lng) return; // 強く蹴れない距離
-      p = laneSafe(m, k, x, y, dx, dy, g.v0);
+      p = laneSafe(m, k, x, y, dx, dy, g.v0, aw);
       const rx = jx - dx, ry = jy - dy;
       const tr = 0.1 + timeToCover(Math.sqrt(rx * rx + ry * ry) - 0.5, vmax[j], acc[j]); // 受け手がそこへ着く時間
       const lag = tr - g.T;
@@ -259,6 +265,7 @@ export function decide(m, i) {
     if (j === i) continue;
     const jx = px[j], jy = py[j], ddx = jx - x, ddy = jy - y, dd = Math.sqrt(ddx * ddx + ddy * ddy);
     if (dd < 4 || dd > vis) continue;
+    if (aw && aw[j] <= f4(seed, t, i, 400 + j)) continue; // 認知: 見えている度合いが、そのときの候補に入る確率（見えていない味方には出せない。見えていれば必ず入る）
     if (slot[j] === 0 && fx > -22) continue; // GKへ戻すのは自陣深くだけ
     if (jx * dir > line + 0.3) continue; // すでにオフサイドの位置の味方には出さない
     evalPass(j, false);
@@ -277,7 +284,7 @@ export function decide(m, i) {
   }
 
   // --- ドリブル（運ぶ）---
-  if (!gk && sp === SP.NONE) carryOptions(m, i, press, false, (V, dx, dy, pace, dist) => consider(V, 4, -1, dx, dy, pace, dist));
+  if (!gk && sp === SP.NONE) carryOptions(m, i, press, false, (V, dx, dy, pace, dist) => consider(V, 4, -1, dx, dy, pace, dist), aw);
 
   // --- クリア（自陣で強く寄せられているとき）---
   if (!gk && sp === SP.NONE && fx < -28 && press > 0.4) {

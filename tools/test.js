@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
-import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf } from '../engine/match.js';
+import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf, frame } from '../engine/match.js';
 import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, BALL_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, BALL_R, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
 import { decide } from '../engine/decide.js';
+import { seeAt, seeAll, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
@@ -536,7 +537,7 @@ await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク�
   const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
   assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
   assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
-  assert.ok(W1.hs > b.hs + 0.04, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`);
+  assert.ok(W1.hs > b.hs + 0.01, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`); // 30試合で測ると +4〜5pt（認知なしは +6pt）。10試合ではばらつくので、向きだけ見る
   assert.ok(T1.hold < b.hold - 0.2 && T0.pass < b.pass * 0.92, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b.pass)}（10分あたり）`);
   assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
   assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
@@ -603,6 +604,7 @@ await test('stamina: 疲れるほど遅くなる（最高速度・加速度）�
 
 // ゴール前の判断: 場面を作って、保持者(me)の最初の判断を調べる。座標は攻める向きを+にした (x, y)。
 // mate=フリーの味方、opp=相手の外野手（相手のGKは (51.5, 0)）。ほかの選手は遠くに散らす。
+// 認知あり（既定）のときは、保持者の体の向き（look: 'goal'=ゴールのほう（既定）・'mate'=味方のほう）と、気づき（scn。省略は今の値）も決める。
 function nearGoalChoice(seed, sc) {
   const m = mk(seed, { home: '4-4-2', away: '4-4-2', abilHome: 10, abilAway: 10 });
   const dir = dirOf(m.N, 0), me = 9, mate = 8;
@@ -613,6 +615,11 @@ function nearGoalChoice(seed, sc) {
   m.F[F_B] = m.px[me]; m.F[F_B + 1] = m.py[me]; m.F[F_B + 2] = BALL_R; m.F[F_B + 3] = 0; m.F[F_B + 4] = 0; m.F[F_B + 5] = 0;
   m.N[I.OWN] = me; m.N[I.POSS] = 0; m.N[I.SETP] = SP.NONE; m.N[I.RECV] = -1; m.N[I.GOT] = 0;
   m.t = 800 + 53 * seed;
+  if (m.pOn) {
+    m.F[F_FACE + me] = sc.look === 'mate' ? M.atan2(m.py[mate] - m.py[me], m.px[mate] - m.px[me]) : dir > 0 ? 0 : M.PI;
+    if (sc.scn !== undefined) m.F[F_SCN + me] = sc.scn;
+    refreshFace(m);
+  }
   const s0 = m.N[I.SHOTS];
   decide(m, me);
   if (m.N[I.SHOTS] > s0) return 'shot';
@@ -624,12 +631,132 @@ await test('shoot: ゴール前で撃てる場面では撃つ（遠い味方へ�
   const free = tally({ me: [46.5, 1], mate: [36, -1], opp: [] }); // 正面6m・相手なし
   const crowd = tally({ me: [47.5, 0.5], mate: [37, -1], opp: [[47.2, 2.0], [46.9, -1.0], [49.5, 0.3], [50.5, 1.0]] }); // 正面5m: 両脇に密着2人＋コースに2人
   const lane = tally({ me: [43.5, -1], mate: [33, 2], opp: [[47, -0.6]] }); // 正面9m・コースに1人
-  const byline = tally({ me: [50.5, 9], mate: [45, 0], opp: [[50, 10.2]] }); // ゴールライン際の脇（ほぼ撃てない）・中央にフリーの味方
+  const byline = tally({ me: [50.5, 9], mate: [45, 0], opp: [[50, 10.2]], look: 'mate' }); // ゴールライン際の脇（ほぼ撃てない）・中央にフリーの味方（中を見ている）
   assert.equal(free.shot, N, `相手なし: 撃つ ${free.shot}/${N}`);
   assert.ok(crowd.shot >= N * 0.8 && crowd.far <= N * 0.15, `5m・密着2人＋コース2人: 撃つ ${crowd.shot}/${N}、遠い味方へ ${crowd.far}`);
   assert.ok(lane.shot >= N * 0.85, `9m・コースに1人: 撃つ ${lane.shot}/${N}`);
   assert.ok(byline.pass >= N * 0.7, `ゴールライン際の脇: 味方へのパス ${byline.pass}/${N}`);
   return `撃つ割合 相手なし ${free.shot}/${N}、5m密着 ${crowd.shot}/${N}、9m ${lane.shot}/${N}、ライン際で味方へ ${byline.pass}/${N}`;
+});
+
+// ── 認知（向き・視野・気づき。engine/percept.js）──
+await test('percept: 認知は既定でつく（percept: 0 で外せる）。同じ入力は同じ結果で、途中の保存→復元→再開も通しと一致', () => {
+  const input = sampleInput(6, { ...OPT, rules: SHORT }), off = sampleInput(6, { ...OPT, rules: SHORT, percept: 0 });
+  const ref = createMatch(input), o = createMatch(off);
+  assert.equal(ref.pOn, 1); assert.equal(o.pOn, 0);
+  assert.equal(ref.F.length, F_LEN_P); assert.equal(o.F.length, F_LEN, '認知なしは従来の長さの状態');
+  assert.equal(frame(o).face, null); assert.equal(frame(ref).face.length, NP);
+  run(ref, 2500);
+  const snap = snapshot(ref);
+  run(ref);
+  const D = digestMatch(ref);
+  restore(ref, snap); run(ref);
+  assert.equal(digestMatch(ref), D, '同じ箱');
+  const fresh = createMatch(input);
+  restore(fresh, snap); run(fresh);
+  assert.equal(digestMatch(fresh), D, '新しい箱');
+  const viaJson = createMatch(input);
+  restore(viaJson, JSON.parse(JSON.stringify(snapshotToJSON(snap)))); run(viaJson);
+  assert.equal(digestMatch(viaJson), D, 'JSON経由');
+  const again = createMatch(input); run(again);
+  assert.equal(digestMatch(again), D, '同じ入力は同じ結果');
+  run(o);
+  assert.notEqual(digestMatch(o), D, '認知なしは別の展開');
+});
+await test('percept: 体の向きは、能力で決まる速さでしか変わらない。走っている選手は進む向きを向く', () => {
+  const m = mk(3);
+  const pf = Float64Array.from(m.F.subarray(F_FACE, F_FACE + NP));
+  let maxTurn = 0, n = 0, al = 0, lp = m.N[I.PHASE];
+  while (m.t < 6000 && stepMatch(m)) {
+    const live = lp === PHASE.LIVE && m.N[I.PHASE] === PHASE.LIVE; // キックオフの並べ直しでは、全員がボールのほうへ向き直る
+    lp = m.N[I.PHASE];
+    for (let i = 0; i < NP; i++) {
+      const a = m.F[F_FACE + i];
+      if (live) maxTurn = Math.max(maxTurn, Math.abs(M.wrapAngle(a - pf[i])) / m.wTurn[i]);
+      pf[i] = a;
+      const sp = Math.sqrt(m.vx[i] * m.vx[i] + m.vy[i] * m.vy[i]);
+      if (live && m.t % 10 === 0 && sp > 5) { n++; al += (m.vx[i] * m.fcx[i] + m.vy[i] * m.fcy[i]) / sp; }
+    }
+  }
+  assert.ok(maxTurn <= 1.0001, `1 tick に向きを変えた量は上限の ${maxTurn.toFixed(3)} 倍`);
+  assert.ok(n > 300 && al / n > 0.8, `5m/s を超えて走っている選手の、向きと進む向きの一致（cos の平均） ${(al / Math.max(1, n)).toFixed(2)}（${n} 件）`);
+  return `向きの変化は上限の ${maxTurn.toFixed(2)} 倍まで、走っているときの向きの一致 ${(al / n).toFixed(2)}`;
+});
+await test('percept: 視野（正面は見え、背後は見えない・広さは能力「視野」・すぐそばは気配で分かる）と、気づき・見えていない相手の扱い', () => {
+  const inp = sampleInput(2, OPT);
+  for (const [k, s] of [[0, 1], [1, 20]]) inp.teams[k].players.forEach((p) => { const v = Array.from(abVec(p.ab)); v[AB.VIS] = s; v[AB.ANT] = s; p.ab = v; }); // チーム0は視野1・予測1、チーム1は視野20・予測20
+  const m = createMatch(inp);
+  const put = (i, x, y) => { m.px[i] = x; m.py[i] = y; m.vx[i] = 0; m.vy[i] = 0; };
+  const face = (i, a, scn) => { m.F[F_FACE + i] = a; m.F[F_SCN + i] = scn; refreshFace(m); };
+  const at = (i, x, y) => seeAt(m, i, m.px[i] + x, m.py[i] + y);
+  for (const [i, wide] of [[5, false], [16, true]]) {
+    put(i, 0, 0); face(i, 0, 0); // +x を向いている・周りを確認していない
+    assert.equal(at(i, 10, 0), 1, '正面は見える');
+    assert.equal(at(i, -10, 0), 0, '背後（遠い）は見えない');
+    assert.equal(at(i, -1, 0), 1, 'すぐそばは気配で分かる');
+    const nz = at(i, -3, 0);
+    assert.ok(nz > 0.3 && nz < 0.9, `背後 3m は少し分かる ${nz.toFixed(2)}`);
+    assert.equal(at(i, -7, 0), 0, '背後 7m は分からない');
+    const c = M.cos(100 * M.PI / 180), sn = M.sin(100 * M.PI / 180);
+    assert.equal(at(i, 10 * c, 10 * sn) === 1, wide, `斜め後ろ 100° の 10m: 視野${wide ? 20 : 1} → ${at(i, 10 * c, 10 * sn).toFixed(2)}`);
+    face(i, 0, 0.5);
+    assert.equal(at(i, -10, 0), 0.5, '気づき 0.5 なら、見えていない範囲も 5 割は分かっている');
+  }
+  // seeAll: 見えていない味方は 0（出せない）、見えていない相手は 0.4（気配・チームの動きから）、自分は 1
+  put(5, 0, 0); face(5, 0, 0);
+  put(4, -20, 0); put(15, -20, 5); put(3, 20, 0); put(14, 20, 5);
+  for (let j = 0; j < NP; j++) if (![5, 4, 15, 3, 14].includes(j)) put(j, -45, 30 - 2 * j);
+  const aw = seeAll(m, 5);
+  assert.equal(aw[5], 1); assert.equal(aw[4], 0, '見えていない味方'); assert.ok(Math.abs(aw[15] - 0.4) < 1e-9, `見えていない相手 ${aw[15]}`);
+  assert.equal(aw[3], 1); assert.equal(aw[14], 1);
+  // 見えていない相手に気づくまでの遅れ（予測の高い選手ほど短い）。見えていれば 0
+  assert.ok(lagOf(m, 5, 15) > 0.45 && lagOf(m, 5, 15) <= 0.5, `予測1の遅れ ${lagOf(m, 5, 15).toFixed(2)}`);
+  assert.equal(lagOf(m, 5, 14), 0);
+  put(16, 0, 0); face(16, 0, 0); put(4, -20, 0);
+  assert.ok(lagOf(m, 16, 4) < 0.25 && lagOf(m, 16, 4) >= 0.15, `予測20の遅れ ${lagOf(m, 16, 4).toFixed(2)}`);
+  assert.ok(m.fov[16] > m.fov[5] + 0.8, `視野の半角 視野20 ${(m.fov[16] * 57.3).toFixed(0)}° / 視野1 ${(m.fov[5] * 57.3).toFixed(0)}°`);
+});
+await test('percept: 気づきは、自由な選手ほど高く、ボールを持って寄せられている選手・ボールの近くで守る選手ほど低い', () => {
+  const run1 = (setup) => { // 22 人を遠くに離して置き、場面だけ作って 15 秒ぶん気づきを更新する（動かさない）
+    const m = mk(1);
+    stepMatch(m);
+    for (let i = 0; i < NP; i++) { m.px[i] = -50 + 3.2 * (i % 11); m.py[i] = i < 11 ? -30 : 30; m.vx[i] = 0; m.vy[i] = 0; m.tx[i] = m.px[i]; m.ty[i] = m.py[i]; m.F[F_SCN + i] = 0.5; }
+    setup(m);
+    m.F[F_B] = m.px[m.N[I.OWN]]; m.F[F_B + 1] = m.py[m.N[I.OWN]];
+    for (let k = 0; k < 300; k++) look(m);
+    return m;
+  };
+  const press = run1((m) => { m.N[I.OWN] = 8; m.N[I.POSS] = 0; m.px[8] = 0; m.py[8] = 0; m.px[12] = 1; m.py[12] = 0; m.tx[8] = 0; m.ty[8] = 0; });
+  const freeH = run1((m) => { m.N[I.OWN] = 8; m.N[I.POSS] = 0; m.px[8] = 0; m.py[8] = 0; m.tx[8] = 0; m.ty[8] = 0; });
+  const guard = run1((m) => { m.N[I.OWN] = 12; m.N[I.POSS] = 1; m.px[12] = 0; m.py[12] = 0; m.px[9] = 4; m.py[9] = 0; m.tx[12] = 0; m.ty[12] = 0; });
+  const a = press.F[F_SCN + 8], b = freeH.F[F_SCN + 8], c = freeH.F[F_SCN + 4], d = guard.F[F_SCN + 9], e = guard.F[F_SCN + 5];
+  assert.ok(a < 0.45, `寄せられている保持者 ${a.toFixed(2)}`);
+  assert.ok(b > a + 0.3 && b > 0.65, `自由な保持者 ${b.toFixed(2)}`);
+  assert.ok(c > 0.95, `自由な味方（ボールを持っているチーム） ${c.toFixed(2)}`);
+  assert.ok(d < 0.25, `ボールの近く（4m）で守る選手 ${d.toFixed(2)}`);
+  assert.ok(e > d + 0.3, `ボールから遠い（25m 以上）守備の選手 ${e.toFixed(2)}`);
+  return `寄せられた保持者 ${a.toFixed(2)}／自由な保持者 ${b.toFixed(2)}／自由な味方 ${c.toFixed(2)}／ボール近くの守備 ${d.toFixed(2)}／遠い守備 ${e.toFixed(2)}`;
+});
+await test('percept: ボールを持った選手は、視野の外（気づきも 0）の味方にはパスを出さない。中を見ていれば出す', () => {
+  const N = 40, byline = { me: [50.5, 9], mate: [45, 0], opp: [[50, 10.2]] };
+  let blind = 0, seen = 0;
+  for (let s = 1; s <= N; s++) {
+    if (nearGoalChoice(s, { ...byline, look: 'goal', scn: 0 }) === 'pass') blind++;
+    if (nearGoalChoice(s, { ...byline, look: 'mate', scn: 0 }) === 'pass') seen++;
+  }
+  assert.equal(blind, 0, `ゴールのほうを向いて、気づき 0: 中央の味方へのパス ${blind}/${N}`);
+  assert.ok(seen >= N * 0.9, `中央の味方のほうを向いている: パス ${seen}/${N}`);
+  return `視野の外の味方へのパス ${blind}/${N}、見えている味方へのパス ${seen}/${N}`;
+});
+await test('percept: 認知ありは、見えていない味方へ出せないぶん、認知なしよりパスが減る', () => {
+  let on = 0, off = 0;
+  for (const seed of [1, 2, 3, 4]) {
+    const a = createMatch(sampleInput(seed, OPT)), b = createMatch(sampleInput(seed, { ...OPT, percept: 0 }));
+    run(a, 24000); run(b, 24000);
+    on += a.N[I.ST + ST.PASS]; off += b.N[I.ST + ST.PASS];
+  }
+  assert.ok(on < off * 0.95, `パス数 認知あり ${on} / 認知なし ${off}`);
+  return `20分×4試合のパス数 認知あり ${on} / 認知なし ${off}（${Math.round(100 * (on / off - 1))}%）`;
 });
 
 // ── 決まりごとの検査 ──

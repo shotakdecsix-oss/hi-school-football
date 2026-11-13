@@ -1,7 +1,7 @@
 // 定数と状態の並び。engine/ のほかのファイルはここから読む。
 
 // 試合の結果が変わる修正をしたら上げる。保存した試合の再生可否の判定に使う（tools/golden.json も更新する）。
-export const ENGINE_VERSION = 11;
+export const ENGINE_VERSION = 12; // 12: 認知（向き・視野・気づき）を既定にした（入力 percept: 0 で従来の「全員が全部見えている」動きに戻せる）
 
 // 時間（固定刻み）。時刻は整数の tick で数え、秒の小数は持たない。
 export const TICK_HZ = 20;
@@ -27,7 +27,11 @@ export const F_R = F_B + 8; // 再開位置 x, y
 export const F_PASS = F_R + 2; // 直近のパスの狙い x, y
 export const F_SB = F_PASS + 2; // 陣形が基準にする「ならしたボール位置」（チームごとに x, y）。ボールにゆっくり追従する
 export const F_STA = F_SB + 4; // 選手ごとのスタミナ（1=万全〜0）。走ると減り、ゆっくり動くと回復する。減るほど最高速度・加速度が落ちる（engine/stamina.js）
-export const F_LEN = F_STA + NP;
+export const F_LEN = F_STA + NP; // 認知なしの長さ（入力 percept が 0 のとき）
+// 認知（engine/percept.js）。入力 percept が 0 でないとき（既定）だけ、F の後ろに確保する
+export const F_FACE = F_LEN; // 選手ごとの体の向き（rad。+x 方向が 0、+y 方向が π/2）
+export const F_SCN = F_FACE + NP; // 選手ごとの気づき（0〜1。周りの状況をどれだけ把握しているか。首を振って確認すると上がり、ボールや相手に気を取られると下がる）
+export const F_LEN_P = F_SCN + NP;
 
 // 状態 N（Int32Array）の並び。選手ごとの4本のあと、全体の値
 export const N_CD = 0; // 選手ごと: クールダウン（ボールに触れない・タックルできない残り tick）

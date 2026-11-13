@@ -30,6 +30,9 @@
   <button id="pz">一時停止</button>
   <span id="spd"></span>
   <label><input id="roles" type="checkbox" checked> 役割の色</label>
+  <label title="オフにすると、全員がピッチの全部が見えている従来の動き（比較用）。切り替えると最初からやり直す"><input id="pc" type="checkbox" checked> 認知</label>
+  <select id="vw" title="体の向き（白い線）と視野（扇形）の表示。一人 = 選手をクリックするとその目線になる（もう一度クリックでボール保持者に戻る）。目線の選手に見えていない選手は薄くなる"><option value="1">視野: 一人</option><option value="2">視野: 全員</option><option value="0">視野: なし</option></select>
+  <small id="vinfo" style="opacity:.85"></small>
   <small id="legend" style="opacity:.7"></small>
   <span id="score"></span>
   <span id="sta" title="外野手10人のスタミナの平均（100%=万全）。走ると減り、減るほど遅くなる。ハーフタイムと交代で回復" style="margin-left:12px;opacity:.85"></span>
@@ -84,17 +87,29 @@ sv.innerHTML = pitchSvg() + '<g id="act"></g>';
 const act = $('act');
 $('legend').textContent = ROLE_LEGEND;
 
-let m, prev, cur, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '', ended = false;
+let m, prev, cur, vp = -1, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '', ended = false;
 const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦'], BREAK = ['', 'ハーフタイム', '延長へ', '延長ハーフタイム', 'PK戦へ'], PKRES = ['外れ', 'ゴール！', 'セーブ！'];
 function start() {
   m = createMatch(sampleInput(+$('seed').value || 1, {
     home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value, rules: RULES[$('rl').value],
-    homeTac: tacOf(0), awayTac: tacOf(1),
+    homeTac: tacOf(0), awayTac: tacOf(1), percept: $('pc').checked ? undefined : 0,
   }));
-  prev = cur = frame(m);
+  vp = -1;
+  prev = cur = frame(m, vp);
   acc = 0; holdUntil = 0; banner = ''; ended = false;
 }
 $('go').onclick = start;
+$('pc').onchange = start;
+sv.onclick = (e) => { // 選手をクリック → その選手の目線（もう一度クリックでボール保持者に戻る）
+  if (!cur.face) return;
+  const pt = sv.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  const q = pt.matrixTransform(sv.getScreenCTM().inverse());
+  let best = -1, bd = 9; // 3m 以内でいちばん近い選手
+  for (let i = 0; i < 22; i++) { const dx = cur.xy[2 * i] - q.x, dy = cur.xy[2 * i + 1] - q.y, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } }
+  vp = best >= 0 && best !== vp ? best : -1;
+  cur = frame(m, vp);
+};
 $('pz').onclick = () => { paused = !paused; $('pz').textContent = paused ? '再開' : '一時停止'; };
 for (const s of [1, 4, 16, 60]) {
   const b = document.createElement('button');
@@ -112,16 +127,17 @@ function loop(now) {
     let n = 0;
     while (acc >= DT && n < 1500) {
       if (!stepMatch(m)) { acc = 0; banner = '試合終了'; ended = true; break; }
-      prev = cur; cur = frame(m); acc -= DT; n++;
+      prev = cur; cur = frame(m, vp); acc -= DT; n++;
       if (cur.half !== prev.half) { banner = cur.half === 5 ? 'PK戦へ' : BREAK[prev.half]; holdUntil = now + 2500; acc = 0; break; }
       if (cur.half === 5 && cur.pkr !== prev.pkr && cur.pkr >= 0) { banner = PKRES[cur.pkr]; holdUntil = now + 1500; acc = 0; break; } // PK戦: 1本ごとの結果を少し見せる
     }
     if (n >= 1500) acc = 0;
     if (now >= holdUntil && banner && !ended) banner = '';
   }
-  act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked);
+  act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked, { view: +$('vw').value });
   const sec = Math.floor(cur.t / TICK_HZ);
   $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]}${cur.half === 5 ? ` ${cur.pk[0]} - ${cur.pk[1]}` : ` ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`}${banner ? '　' + banner : ''}`;
+  $('vinfo').textContent = !cur.face ? '' : cur.seeBy < 0 ? '目線: （ボールは誰も持っていない）' : `目線: ${cur.seeBy < 11 ? '赤' : '青'}${(cur.seeBy % 11) + 1}番${vp < 0 ? '（保持者）' : ''}　気づき ${Math.round(100 * cur.scn[cur.seeBy])}%`;
   $('sta').textContent = `体力 赤${Math.round(100 * staminaOf(m, 0))}% 青${Math.round(100 * staminaOf(m, 1))}%`;
   requestAnimationFrame(loop);
 }

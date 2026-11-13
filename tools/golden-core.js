@@ -5,7 +5,7 @@ import { sampleInput } from '../engine/sample.js';
 import { ENGINE_VERSION } from '../engine/consts.js';
 import { RULES } from '../data/rules.js';
 
-// ticks の最後（Infinity）は「試合の最後まで」。cases は条件違いの組（リーグ戦90分と、延長・PK戦まで通る超短い試合）
+// ticks の最後（Infinity）は「試合の最後まで」。cases は条件違いの組（リーグ戦90分と、延長・PK戦まで通る超短い試合、交代あり、認知なし）
 export const GOLDEN_SPEC = {
   seeds: [1, 2, 3],
   ticks: [1200, 12000, Infinity],
@@ -35,6 +35,10 @@ export async function computeGolden(spec = GOLDEN_SPEC, onStep = async () => {})
     const mc = createMatch(sampleInput(seed, { ...spec.opts, rules: spec.short, changes: spec.changes })); // 交代あり（ハーフタイム・中断・GK交代）
     run(mc);
     row.push(digestMatch(mc));
+    await onStep(seed, 0);
+    const mp = createMatch(sampleInput(seed, { ...spec.opts, percept: 0 })); // 認知なし（全員が全部見えている従来の動き。比較用に残してある）
+    run(mp);
+    row.push(digestMatch(mp));
     await onStep(seed, 0);
     out.cases[seed] = row;
   }

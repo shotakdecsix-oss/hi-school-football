@@ -12,6 +12,7 @@ import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
+import { lagOf } from './percept.js';
 
 // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）は、指示（ライン高さ）から決まる m.tac[k].floorD（標準 13）。6ヤードボックスに張り付いて壁になるのを防ぐ
 const SB_UP = 15, SB_TUCK = 0.35; // SBの攻撃参加: ボール側で上がる量(m)・逆サイドで絞る割合（ボールが敵陣深くのとき最大）
@@ -22,6 +23,7 @@ const KX_DEF = [0, 0.95, 0.95, 1, 1, 1, 0.9, 0.65];
 const PRESS_BIAS = [1, 1.7, 1.15, 0.95, 1, 1.05, 1.1, 1.25]; // プレスに行きやすさ（小さいほど行く）
 const UR = [[1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071], [0, -1], [0.7071, -0.7071]];
 const CH = [-0.65, -0.33, 0, 0.33, 0.65]; // 裏へ抜ける動きの横位置（ピッチ幅に対する割合）
+const TURN_ACC = 0.75; // 認知: 体の向きと逆へ動き出すときの加速度の倍率（向きが合っていれば 1。背を向けたまま走り出すと遅れる）
 const RISK_PUSH = [0, 3, 4, 3, 4, 3, 3, 2]; // 指示 リスクで前へ出る量（push 1 あたり m。G C S D M W A F）
 const laneOf = (y) => (y < -20.4 ? 0 : y < -6.8 ? 1 : y < 6.8 ? 2 : y < 20.4 ? 3 : 4); // 5レーン（幅 13.6m ずつ。大外・ハーフスペース・中央・ハーフスペース・大外）
 
@@ -298,7 +300,9 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         break;
       }
       case ACT.MARK: {
-        const q = tgt[i], ox = px[q], oy = py[q];
+        const q = tgt[i];
+        let ox = px[q], oy = py[q];
+        if (m.pOn) { const lg = lagOf(m, i, q); ox -= m.vx[q] * lg; oy -= m.vy[q] * lg; } // 認知: 見えていない相手は、少し前の位置にいるつもりで守る（背後の走り込みに遅れる）
         const ux = gx - ox, uy = -oy, L = Math.sqrt(ux * ux + uy * uy) || 1;
         const wx = bx - ox, wy = by - oy, L2 = Math.sqrt(wx * wx + wy * wy) || 1;
         const gs = (L2 < 12 ? 2 : L2 < 25 ? 3.5 : 5) * tc.gsK; // ボールから遠い相手ほど、ゆるく（深めに）見る
@@ -526,7 +530,9 @@ export function movePlayers(m) {
       const s = Math.min(cap, (d - dz) * (urgent ? 2.6 : 1.5)) / d; wx = dx * s; wy = dy * s;
     }
     let ax = wx - vx[i], ay = wy - vy[i];
-    const lim = acc[i] * (slot[i] === 0 ? (pc[i] >= 1 ? 3 : 2) : 1) * DT, da = Math.sqrt(ax * ax + ay * ay);
+    let lim = acc[i] * (slot[i] === 0 ? (pc[i] >= 1 ? 3 : 2) : 1) * DT;
+    if (m.pOn) { const ww = Math.sqrt(wx * wx + wy * wy); if (ww > 0.3) lim *= TURN_ACC + (1 - TURN_ACC) * 0.5 * (1 + (wx * m.fcx[i] + wy * m.fcy[i]) / ww); } // 認知: 動きたい向きが体の向きとずれるほど、加速が遅れる
+    const da = Math.sqrt(ax * ax + ay * ay);
     if (da > lim) { const s = lim / da; ax *= s; ay *= s; }
     vx[i] += ax; vy[i] += ay;
     px[i] = clamp(px[i] + vx[i] * DT, -HL - 2, HL + 2);

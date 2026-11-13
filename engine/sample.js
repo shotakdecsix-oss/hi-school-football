@@ -23,7 +23,7 @@ const BENCH_ROLES = [R.G, R.D, R.C, R.M, R.W, R.A, R.F, R.S];
 // changes は交代の指示 [{ t, k, type: 'sub', slot, bench }]（engine/match.js の入力を見る）
 export function sampleInput(seed, o = {}) {
   // rules は data/rules.js の値（省略 = リーグ戦）。homeTac / awayTac はチーム指示（data/tactics.js。省略 = 標準）
-  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10, rules, changes = [], homeTac, awayTac } = o;
+  const { home = '4-4-2', away = '4-4-2', abilHome = 10, abilAway = 10, rules, changes = [], homeTac, awayTac, percept } = o; // percept: 0 を渡すと認知（向き・視野・気づき）なし（比較用）。省略 = あり
   const player = (k, s, role, base, id) => {
     const prof = PROFILE[role];
     const ab = KEYS.map((name, a) => {
@@ -38,5 +38,7 @@ export function sampleInput(seed, o = {}) {
     players: FORMATIONS[formation].map((def, s) => player(k, s, def[2], base, 'T' + k + 'P' + s)),
     bench: BENCH_ROLES.map((role, b) => player(k, 11 + b, role, base - 1, 'T' + k + 'B' + b)),
   });
-  return { seed, teams: [team(0, home, abilHome, homeTac), team(1, away, abilAway, awayTac)], changes, rules };
+  const input = { seed, teams: [team(0, home, abilHome, homeTac), team(1, away, abilAway, awayTac)], changes, rules };
+  if (percept === 0 || percept === false) input.percept = 0;
+  return input;
 }

@@ -5,9 +5,12 @@
 // --check: 各試合を2回走らせてチェック値が一致するか確かめる（再現性の確認）
 // --tacH / --tacA: 家（チーム0）・相手（チーム1）のチーム指示（data/tactics.js のキー=-1〜1 をカンマ区切り。例 line=1,pressPower=0.5）。
 //   指示を与えるか --def を付けると、守備のブロック（相手が保持しているときの陣形）の表も出す
+// --noPercept: 認知（向き・視野・気づき）なしで走らせる（全員が全部見えている従来の動き。比較用）
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
-import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, F_PASS, F_STA, dirOf } from '../engine/consts.js';
+import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, F_PASS, F_STA, F_SCN, dirOf } from '../engine/consts.js';
+import { seeAll } from '../engine/percept.js';
+import { pressureAt } from '../engine/decide.js';
 import { RULES } from '../data/rules.js';
 import { TACTICS } from '../data/tactics.js';
 import { staminaOf } from '../engine/stamina.js';
@@ -28,13 +31,15 @@ const parseTac = (txt) => {
 };
 const tacH = parseTac(arg('tacH', '')), tacA = parseTac(arg('tacA', ''));
 const showDef = process.argv.includes('--def') || Object.keys(tacH).length + Object.keys(tacA).length > 0;
-const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules, homeTac: tacH, awayTac: tacA };
+const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules, homeTac: tacH, awayTac: tacA, percept: process.argv.includes('--noPercept') ? 0 : 1 };
 const SAMPLE_EVERY = 10; // 0.5 秒ごとに動きを測る
 
 const mkInput = (seed) => {
   if (!flat) return sampleInput(seed, o);
   const team = (f, a, tactics) => ({ formation: f, tactics, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
-  return { seed, changes: [], rules, teams: [team(o.home, o.abilHome, tacH), team(o.away, o.abilAway, tacA)] };
+  const inp = { seed, changes: [], rules, teams: [team(o.home, o.abilHome, tacH), team(o.away, o.abilAway, tacA)] };
+  if (!o.percept) inp.percept = 0;
+  return inp;
 };
 
 const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib', 'thr', 'gk', 'ck'];
@@ -47,6 +52,8 @@ const STA = [0, 1].map(() => ({ h1: 0, end: 0, min: 1 })); // スタミナ: 前�
 const TR = [0, 1].map(() => ({ lost: [0, 0, 0], reg5: [0, 0, 0], shots8: [0, 0, 0], goals8: [0, 0, 0], won: 0, wshots8: 0, prog4: 0, progN: 0, behind: 0, behindN: 0, oh: 0, ohN: 0, r3b: 0, r3n: 0, r3c: 0 }));
 // 攻撃の配置: far=逆サイドの選手の幅(m)、ovl=敵陣の同レーン重なり率、lanes=占有レーン数、fl=敵陣最終盤でボールのいる所(大外/ハーフスペース/中央)、pass=パスの長さ・向き・間隔・持ち時間
 const AP = [0, 1].map(() => ({ far: 0, farN: 0, ovl: 0, ovlN: 0, lanes: 0, laneN: 0, fl: [0, 0, 0], pn: 0, plen: 0, fwd: 0, bwd: 0, hold: 0, gap: 0, gapN: 0, sup: 0, supN: 0, btw: 0, btwN: 0 }));
+// 認知（--percept）: 保持者の見え方と、守備のマークの見え方、奪われたときの向き
+const PC = [0, 1].map(() => ({ n: 0, mates: 0, unseen: 0, opp: 0, oppSeen: 0, prR: 0, prP: 0, scan: 0, mk: 0, mkSeen: 0, mkLost: 0, mkN: 0, tk: 0, tkBack: 0, tkSide: 0 }));
 const laneOf = (y) => (y < -20.4 ? 0 : y < -6.8 ? 1 : y < 6.8 ? 2 : y < 20.4 ? 3 : 4); // 5レーン（幅 13.6m ずつ）
 let w = 0, d = 0, l = 0, bad = 0, ticksLive = 0, ticksAll = 0, allTicks = 0, pkMatches = 0;
 const pkRes = [0, 0, 0]; // PK戦の1本ごとの結果（外れ・ゴール・セーブ）
@@ -56,6 +63,7 @@ for (let s = 0; s < n; s++) {
   const input = mkInput(seed0 + s), m = createMatch(input);
   let lastC = -1e9;
   let lastK = -1; const lastPass = [null, null];
+  let prevOwn = -1, prevOwnT = -9; // 保持者の直接の入れ替わり（タックル）を見つける用
   const chg = [], pend = [], pend3 = []; // 切り替え（ボールを持つチームが入れ替わった）の記録と、4秒後のボールの位置を見る予約
   while (stepMatch(m)) {
     if (m.t === m.pEnd[0] - 1) for (let k = 0; k < 2; k++) STA[k].h1 += staminaOf(m, k);
@@ -82,12 +90,44 @@ for (let s = 0; s < n; s++) {
       TR[lo].r3b += bb; TR[lo].r3c += nb; TR[lo].r3n++;
     }
     while (pend.length && pend[0][0] <= m.t) { const [, w2, fx0] = pend.shift(); TR[w2].prog4 += m.F[F_B] * dirOf(m.N, w2) - fx0; TR[w2].progN++; }
+    if (m.pOn && m.N[I.PHASE] === PHASE.LIVE) {
+      const o2 = m.N[I.OWN];
+      if (o2 >= 0) {
+        if (prevOwn >= 0 && prevOwnT === m.t - 1 && o2 !== prevOwn && m.team[o2] !== m.team[prevOwn]) { // タックルで奪われた: 奪った相手が、奪われた側の向きのどちら側にいたか
+          const e = PC[m.team[prevOwn]], dx = m.px[o2] - m.px[prevOwn], dy = m.py[o2] - m.py[prevOwn], dd = Math.sqrt(dx * dx + dy * dy) || 1;
+          const cs = (m.fcx[prevOwn] * dx + m.fcy[prevOwn] * dy) / dd;
+          e.tk++; if (cs < 0) e.tkBack++; else if (cs < 0.5) e.tkSide++;
+        }
+        prevOwn = o2; prevOwnT = m.t;
+      }
+    }
     if (m.t % SAMPLE_EVERY || m.N[I.PHASE] === PHASE.PK) continue;
     ticksAll++;
     if (m.N[I.PHASE] !== PHASE.LIVE) continue;
     ticksLive++;
     const pk = m.N[I.POSS]; mv[pk].poss++;
     const own = m.N[I.OWN];
+    if (m.pOn && own >= 0 && m.slot[own] !== 0) { // 認知: 保持者の見え方（35m以内の味方で見えていない割合・10m以内の相手の見えている度合い・圧力の実際と見え方・気づき）
+      const k2 = m.team[own], e = PC[k2], aw = seeAll(m, own);
+      e.n++;
+      for (let j = 0; j < NP; j++) {
+        if (j === own) continue;
+        const dd = Math.sqrt((m.px[j] - m.px[own]) ** 2 + (m.py[j] - m.py[own]) ** 2);
+        if (m.team[j] === k2) { if (m.slot[j] !== 0 && dd >= 4 && dd <= 35) { e.mates++; if (aw[j] < 0.3) e.unseen++; } }
+        else if (dd < 10) { e.opp++; e.oppSeen += aw[j]; }
+      }
+      e.prR += pressureAt(m, m.px[own], m.py[own], k2); e.prP += pressureAt(m, m.px[own], m.py[own], k2, aw); e.scan += m.F[F_SCN + own];
+      for (let k3 = 0; k3 < 2; k3++) { // 守備側のマーク: マーク相手がどれだけ見えているか
+        if (k3 === k2) continue;
+        const e2 = PC[k3], aw2 = null;
+        for (let s2 = 1; s2 < 11; s2++) {
+          const i = k3 * 11 + s2;
+          if (m.act[i] !== ACT.MARK || m.tgt[i] < 0) continue;
+          const a2 = seeAll(m, i)[m.tgt[i]];
+          e2.mkN++; e2.mkSeen += a2; if (a2 < 0.5) e2.mkLost++;
+        }
+      }
+    }
     for (let k = 0; k < 2; k++) {
       const dir = dirOf(m.N, k), M = mv[k], base = k * 11;
       const att = own >= 0 && m.team[own] === k; // 持っているチームだけ集計（守備側は別に len/wid だけ）
@@ -201,6 +241,13 @@ for (let k = 0; k < 2; k++) {
   for (let k = 0; k < 2; k++) {
     const A = AP[k], fs = A.fl[0] + A.fl[1] + A.fl[2];
     console.log(`  チーム${k}   ${f1(A.far / Math.max(1, A.farN))}m   ${pc(A.ovl / Math.max(1, A.ovlN))}   ${f1(A.lanes / Math.max(1, A.laneN))}   ${pc(A.fl[0] / Math.max(1, fs))}/${pc(A.fl[1] / Math.max(1, fs))}/${pc(A.fl[2] / Math.max(1, fs))}   ${f1(A.plen / Math.max(1, A.pn))}m  ${pc(A.fwd / Math.max(1, A.pn))}/${pc(A.bwd / Math.max(1, A.pn))}  ${f1(A.hold / Math.max(1, A.sup))}秒  ${f1(A.gap / Math.max(1, A.gapN))}秒  ${f1(A.btw / Math.max(1, A.btwN))}人`);
+  }
+}
+if (o.percept) {
+  console.log('認知  保持者: 味方(4〜35m)のうち見えていない割合 / 10m以内の相手の見えている度合い / 圧力 実際→見えている / 気づき     守備: マーク相手の見えている度合い(見失い<0.5の割合)     奪われた向き: 保持者の背後から / 横から');
+  for (let k = 0; k < 2; k++) {
+    const E = PC[k];
+    console.log(`  チーム${k}   ${pc(E.unseen / Math.max(1, E.mates))}   ${(E.oppSeen / Math.max(1, E.opp)).toFixed(2)}   ${(E.prR / Math.max(1, E.n)).toFixed(2)}→${(E.prP / Math.max(1, E.n)).toFixed(2)}   ${(E.scan / Math.max(1, E.n)).toFixed(2)}     ${(E.mkSeen / Math.max(1, E.mkN)).toFixed(2)}(${pc(E.mkLost / Math.max(1, E.mkN))})     ${pc(E.tkBack / Math.max(1, E.tk))} / ${pc(E.tkSide / Math.max(1, E.tk))}（奪われ ${f1(E.tk / n)}回）`);
   }
 }
 if (showDef) {

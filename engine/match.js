@@ -3,7 +3,7 @@
 // 時間は固定刻み（20Hz）の整数 tick。乱数は (試合の種, tick, 選手, 用途) から作るので、状態を持たない。
 import {
   ENGINE_VERSION, DT, TICK_HZ, NP, HL, HW, BALL_R, PRED_N,
-  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_STA, F_LEN,
+  F_PX, F_PY, F_VX, F_VY, F_TX, F_TY, F_PC, F_B, F_R, F_STA, F_LEN, F_LEN_P, F_FACE, F_SCN,
   I, N_CD, N_ACT, N_TGT, N_TMR, N_LEN, PHASE, NEXT, EV, ACT, SP, SP_WAIT, GOAL_WAIT, ST, ST_N, dirOf,
 } from './consts.js';
 import { FORMATIONS, ROLE } from '../data/formations.js';
@@ -16,6 +16,7 @@ import { decide } from './decide.js';
 import { tacParams } from './tactic.js';
 import { pkOrder, startPK, stepPK } from './pk.js';
 import { fatigue, tire, rest, drainK, recoverK } from './stamina.js';
+import { setLook, initLook, look, refreshFace, seeAt } from './percept.js';
 export { staminaOf } from './stamina.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
@@ -27,11 +28,12 @@ import { clamp } from './core/math.js';
 // changes = [ { t, k, type: 'sub', slot, bench } ... ]: t(tick)以降の最初の中断（ボールが出た・ゴールのあと）かハーフタイムで、
 // チームkのスロット slot の選手を bench 番目の控えに替える。規定の人数・回数を超える交代、出場済みの控えは実行されない（記録の最後が 0）。
 export function createMatch(input) {
-  const F = new Float64Array(F_LEN), N = new Int32Array(N_LEN);
+  const pOn = input.percept === undefined || input.percept ? 1 : 0; // 認知（向き・視野・気づき。engine/percept.js）。既定はあり。input.percept = 0 のときだけ、全員が全部見えている従来の動き
+  const F = new Float64Array(pOn ? F_LEN_P : F_LEN), N = new Int32Array(N_LEN);
   const sub = (a, o) => a.subarray(o, o + NP);
   const rules = normRules(input.rules), h = rules.half * 60 * TICK_HZ, e = rules.et * 60 * TICK_HZ;
   const m = {
-    input, seed: input.seed | 0, t: 0, log: [], F, N,
+    input, seed: input.seed | 0, t: 0, log: [], F, N, pOn,
     rules, pEnd: [h, 2 * h, 2 * h + e, 2 * h + 2 * e], // 規定と、各区間（前半・後半・延長前半・延長後半）が終わる tick（入力から決まる値）
     px: sub(F, F_PX), py: sub(F, F_PY), vx: sub(F, F_VX), vy: sub(F, F_VY), tx: sub(F, F_TX), ty: sub(F, F_TY), pc: sub(F, F_PC),
     cd: sub(N, N_CD), act: sub(N, N_ACT), tgt: sub(N, N_TGT), tmr: sub(N, N_TMR),
@@ -41,6 +43,8 @@ export function createMatch(input) {
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
     vmax0: new Float64Array(NP), acc0: new Float64Array(NP), sdr: new Float64Array(NP), srec: new Float64Array(NP), // 能力から決まる本来の最高速度・加速度と、スタミナの消耗・回復の倍率（vmax・acc は、そこから疲れ分を引いた今の値）
     cx0: new Float64Array(2), kick: new Uint8Array(2),
+    cIn: new Float64Array(NP), cOut: new Float64Array(NP), wTurn: new Float64Array(NP), tLag: new Float64Array(NP), rScan: new Float64Array(NP), fov: new Float64Array(NP), // 認知: 視野の内側・外側の cos、向きを変える速さ、気づくまでの遅れ、気づきの上がる速さ、視野の半角（rad）（能力から決まる）
+    fcx: new Float64Array(NP), fcy: new Float64Array(NP), aw: new Float64Array(NP), // 認知: 向きの cos/sin（毎tick作り直す）、判断のたびに作る見えている度合い（作業用）
     tac: [tacParams(input.teams[0].tactics), tacParams(input.teams[1].tactics)], // チーム指示から作った数値（engine/tactic.js）
     changes: (input.changes || []).filter((c) => c.type === 'sub').map((c, n) => [c, n]).sort((a, b) => a[0].t - b[0].t || a[1] - b[1]).map((a) => a[0]), // 交代（t の順。入力から決まる値）
     nb: new Int8Array(NP * 3).fill(-1), nw: new Float64Array(NP * 3), // 陣形上の隣（持ち場が近い3人）とその重み
@@ -110,6 +114,7 @@ function setPlayerAb(m, i, ab) {
   m.sdr[i] = drainK(v[AB.STM]); m.srec[i] = recoverK(v[AB.STM]);
   fatigue(m, i); // 疲れ分を引いた今の値（vmax・acc）
   m.rgk[i] = m.slot[i] === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
+  if (m.pOn) setLook(m, i); // 視野・向きを変える速さなど（認知）
 }
 
 // 状態 N の出場者（OCC）に合わせて、能力などの入力から決まる値を作り直す（復元のあとに必要）
@@ -161,6 +166,7 @@ function placeKickoff(m, kteam) {
   F[F_B + 2] = BALL_R;
   N[I.LOCK] = 40; N[I.LOCKT] = kteam; N[I.PHASE] = PHASE.LIVE;
   N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE; N[I.CHGT] = NO_CHG;
+  if (m.pOn) initLook(m); // 全員がボールのほうを向く
 }
 
 function pause(m, ticks, next, rteam) {
@@ -241,6 +247,7 @@ export function stepMatch(m) {
   think(m);
   movePlayers(m);
   tire(m);
+  if (m.pOn) look(m); // 向きと気づきを更新（認知）
   if (ph === PHASE.LIVE) {
     let ev;
     if (N[I.OWN] >= 0) ev = carryBall(m);
@@ -306,6 +313,7 @@ export function snapshot(m) {
 export function restore(m, s) {
   m.t = s.t; m.F.set(s.F); m.N.set(s.N); m.log = s.log.map((e) => e.slice());
   refreshOccupants(m); // 交代があったあとの能力などを作り直す
+  if (m.pOn) refreshFace(m);
 }
 export function snapshotToJSON(s) {
   return { t: s.t, F: Array.from(s.F), N: Array.from(s.N), log: s.log };
@@ -334,13 +342,20 @@ function roleView(m) {
   return a;
 }
 
-export function frame(m) {
+// vp: 見え方を調べる選手（省略 = ボールを持っている選手）。認知ありのとき、その選手から見た全員の見えている度合い（0〜1）を see に入れる（表示用）
+export function frame(m, vp = -1) {
   const xy = new Float32Array(2 * NP);
   for (let i = 0; i < NP; i++) { xy[2 * i] = m.px[i]; xy[2 * i + 1] = m.py[i]; }
+  const seeBy = m.pOn ? (vp >= 0 ? vp : m.N[I.OWN]) : -1;
+  let see = null;
+  if (seeBy >= 0) { see = new Float32Array(NP); for (let j = 0; j < NP; j++) see[j] = j === seeBy ? 1 : seeAt(m, seeBy, m.px[j], m.py[j]); }
   return {
     t: m.t, xy, ball: new Float32Array([m.F[F_B], m.F[F_B + 1], m.F[F_B + 2]]),
     score: [m.N[I.SCORE], m.N[I.SCORE + 1]], phase: m.N[I.PHASE], half: m.N[I.HALF],
     pk: [m.N[I.PKG], m.N[I.PKG + 1]], pkr: m.N[I.PKR], // PK戦の得点と、直近のキックの結果（-1=まだ 0=外れ 1=ゴール 2=セーブ）
     own: m.N[I.OWN], act: roleView(m),
+    face: m.pOn ? Float32Array.from(m.F.subarray(F_FACE, F_FACE + NP)) : null, // 認知ありのとき、22人の体の向き（rad）
+    fov: m.pOn ? Float32Array.from(m.fov) : null, scn: m.pOn ? Float32Array.from(m.F.subarray(F_SCN, F_SCN + NP)) : null, // 視野の半角（rad）・気づき（0〜1）
+    seeBy, see,
   };
 }

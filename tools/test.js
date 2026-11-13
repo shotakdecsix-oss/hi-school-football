@@ -15,10 +15,11 @@ import { AB, NAB, abVec, effVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
 import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, N_LEN, NEVER_SEEN, BALL_R, PRED_N, PRED_TICKS, DT, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
-import { decide } from '../engine/decide.js';
+import { decide, lureOf, offsideLine } from '../engine/decide.js';
 import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { STYLES } from '../data/styles.js';
+import { ROLE } from '../data/formations.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
@@ -589,6 +590,65 @@ await test('tactics: 組み立て（build）— 0 は標準のまま。+1 でロ
   assert.ok(h1.back > b.back + 0.03, `後ろ向きのパスの割合 つなぐ${p(h1.back)} 標準${p(b.back)}`);
   assert.ok(h1.pass > b.pass * 1.15 && d1.pass < b.pass * 0.85, `パス本数 つなぐ${f(h1.pass)} 標準${f(b.pass)} 蹴る${f(d1.pass)}`);
   return `ロング ${f(h1.long)}/${f(b.long)}/${f(d1.long)}  クリア ${f(h1.clr)}/${f(b.clr)}/${f(d1.clr)}  後ろ向き ${p(h1.back)}/${p(b.back)}/${p(d1.back)}  パス ${f(h1.pass)}/${f(b.pass)}/${f(d1.pass)}（−1/0/+1。8試合の15分あたり）`;
+});
+// 後ろの形の集計（④の残り）。チーム0だけに指示を与え、チーム0がボールを持って自陣の深く（ボールがハーフウェーより 10m 以上自陣側）にあるとき、0.5秒ごとに GK の奥行き（自陣ゴールラインから m）・
+// CBの横の位置（平均の絶対値）・降りる選手（守備的MF。なければ中央のMF）の奥行きを集める
+function shapeStats(tac, seeds, minutes = 12) {
+  const o = { n: 0, gk: 0, cb: 0, dm: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      if (m.t % 10 || m.N[I.PHASE] !== PHASE.LIVE) continue;
+      const own = m.N[I.OWN], dir = dirOf(m.N, 0);
+      if (own < 0 || m.team[own] !== 0 || m.F[F_B] * dir > -10) continue;
+      let cb = 0, nc = 0, dm = 1e9;
+      for (let s = 1; s < 11; s++) {
+        const r = m.role[s], f = m.px[s] * dir + HL;
+        if (r === ROLE.C) { cb += Math.abs(m.py[s]); nc++; }
+        if ((r === ROLE.D || r === ROLE.M) && f < dm) dm = f;
+      }
+      o.n++; o.gk += m.px[0] * dir + HL; o.cb += cb / nc; o.dm += dm;
+    }
+  }
+  return { n: o.n, gk: o.gk / o.n, cb: o.cb / o.n, dm: o.dm / o.n };
+}
+// 擬似カウンターの集計。チーム0（つなぐ・リスク+0.5）が、高いライン・強いプレスの相手と戦う。lure=false なら擬似カウンターだけ外す（lureK=0）。
+// 裏へのパス（自陣から相手の最終ラインの 8m 手前より先へ出す長いパス）の本数と、相手のシュート数を数える。24試合×30分で 裏へ 3.8/2.1・相手のシュート 13.0/17.6（あり/なし）
+function lureStats(lure, seeds, minutes = 30) {
+  const o = { thr: 0, sa: 0, sf: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { home: '4-4-2', away: '4-4-2', abilHome: 10, abilAway: 10, homeTac: { build: -1, risk: 0.5 }, awayTac: { line: 1, pressZone: 1, pressPower: 1, onLose: 1 } })); // 互角（力10 同士の 4-4-2）
+    if (!lure) m.tac[0].lureK = 0;
+    let lastK = -1;
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      if (m.N[I.KICKT] === lastK) continue;
+      lastK = m.N[I.KICKT];
+      const ps = m.N[I.LAST];
+      if (m.N[I.RECV] < 0 || m.N[I.PASSK] !== 0 || ps < 0 || m.team[ps] !== 0 || m.slot[ps] === 0 || m.N[I.PHASE] !== PHASE.LIVE) continue;
+      const d = dirOf(m.N, 0);
+      if (m.F[F_PASS] * d > offsideLine(m, 0) - 8 && m.F[F_B] * d < offsideLine(m, 0) - 20) o.thr++;
+    }
+    o.sa += m.N[I.SHOTS + 1]; o.sf += m.N[I.SHOTS];
+  }
+  const n = seeds.length;
+  return { thr: o.thr / n, sa: o.sa / n, sf: o.sf / n };
+}
+await test('tactics: 後ろからつなぐ陣形・擬似カウンター — 組み立て−1 で GK が前へ・守備的MFが降り・CBが開く。0 や蹴る側は標準のまま。裏への出し方は、つなぐ×リスクの強さ', () => {
+  const z = tacParams({}), h = tacParams({ build: -1 }), hs = tacParams({ build: -1, risk: -1 }), hr = tacParams({ build: -1, risk: 1 }), d = tacParams({ build: 1, risk: 1 });
+  assert.ok(z.bsK === 0 && z.lureK === 0 && d.bsK === 0 && d.lureK === 0, '標準と蹴る側は後ろの陣形・誘い込みなし');
+  assert.ok(h.bsK === 1 && h.lureK === 0.5 && hs.bsK === 1 && hs.lureK === 0 && hr.lureK === 1, `つなぐ −1 で陣形は最大。誘い込みはリスクで 0 / 0.5 / 1（${h.lureK}/${hs.lureK}/${hr.lureK}）`);
+  assert.ok(lureOf({ lureK: 0 }, -5) === 0 && lureOf({ lureK: 1 }, 25) === 0 && lureOf({ lureK: 1 }, 14) === 0 && lureOf({ lureK: 1 }, 2) === 1 && lureOf({ lureK: 0.5 }, 8) === 0.25, '誘い込みの度合い: 相手の最終ラインが高いほど強い（14m で 0・2m で最大）');
+  const S = [1, 2, 3, 4, 5, 6, 7, 8], b = shapeStats({}, S), h1 = shapeStats({ build: -1 }, S), d1 = shapeStats({ build: 1 }, S);
+  const f = (x) => x.toFixed(1);
+  // 16試合×15分で測ると（v16）GK 奥行き 3.5→5.3、CB 横 7.8→9.0、降りる選手 33.2→24.3（つなぐ −1 / 標準）。蹴る側は標準と同じ（ボールを持つ時間が違うので少しばらつく）
+  assert.ok(h1.gk > b.gk + 1.2, `GKが前へ: つなぐ ${f(h1.gk)}m 標準 ${f(b.gk)}m`);
+  assert.ok(h1.dm < b.dm - 4, `守備的MFが降りる: つなぐ ${f(h1.dm)}m 標準 ${f(b.dm)}m`);
+  assert.ok(h1.cb > b.cb + 0.6, `CBが開く: つなぐ ${f(h1.cb)}m 標準 ${f(b.cb)}m`);
+  assert.ok(Math.abs(d1.gk - b.gk) < 1 && Math.abs(d1.dm - b.dm) < 5, `蹴る側は後ろの陣形が変わらない（GK ${f(d1.gk)}/${f(b.gk)}m・降りる選手 ${f(d1.dm)}/${f(b.dm)}m）`);
+  const L = [1, 2, 3, 4, 5, 6, 7, 8], on = lureStats(true, L), off = lureStats(false, L);
+  assert.ok(on.thr > off.thr * 1.2, `擬似カウンター: 裏へのパス あり ${f(on.thr)} なし ${f(off.thr)}（30分あたり）`);
+  assert.ok(on.sa < off.sa * 0.92, `擬似カウンター: 高いラインの相手のシュートは、裏へ出せると減る あり ${f(on.sa)} なし ${f(off.sa)}`);
+  return `GK ${f(h1.gk)}/${f(b.gk)}m  降りる ${f(h1.dm)}/${f(b.dm)}m  CB横 ${f(h1.cb)}/${f(b.cb)}m（つなぐ/標準）  vs高いライン: 裏へ ${f(on.thr)}/${f(off.thr)}・被シュート ${f(on.sa)}/${f(off.sa)}（擬似カウンター あり/なし）`;
 });
 await test('styles: チームの戦い方の型（標準・保持・直接）は、指示の項目と範囲に合っている', () => {
   const keys = new Set(TACTICS.map((d) => d.key));

@@ -28,6 +28,12 @@ const PA0 = 0.5, PA1 = 0.52;
 const K_PRS = 0.5; // 行き先の圧力による価値の割引（圧力1.5で 1-1.5*K_PRS）。人でごった返すゴール前へ突っ込まない
 const prsF = (pd) => { const f = 1 - K_PRS * (pd > 1.5 ? 1.5 : pd); return f > 0.25 ? f : 0.25; };
 
+// 擬似カウンター（組み立てをつなぐ側にしたチームが、相手を誘い込んで裏へ出す）: 相手の最終ライン（攻める向きを+にした座標）が LURE_L0 より前（相手側のハーフウェー寄り）に上がっているほど、
+// 誘い込めた度合いが 0〜1 に上がる（LURE_W m で最大。標準の相手は 7/18/31（10/50/90%）、高いライン・強いプレスの相手は 0/4/8）。指示の強さ lureK を掛けた値。lureK=0 なら 0（従来と同じ）。
+// 効き: ライン裏（最終ラインの 8m 手前〜）へのパスは、行き先の価値が最大 (1+LURE_X) 倍・長いパスの減点が 0 になる。brain.js では前線が自陣深くからでも裏へ走り出す
+const LURE_L0 = 14, LURE_W = 12, LURE_X = 1.5;
+export function lureOf(ap, line) { return ap.lureK > 0 ? ap.lureK * clamp((LURE_L0 - line) / LURE_W, 0, 1) : 0; }
+
 // 攻め方（中央から ←→ サイドから）: 行き先の価値を、横位置で増減する倍率。敵陣のほうが強く効く。指示が 0 なら 1
 export function latM(ap, dfx, dfy) {
   if (ap.latK === 0) return 1;
@@ -222,6 +228,7 @@ export function decide(m, i) {
   const pas = ab[A + AB.PAS], lng = gk ? ab[A + AB.GKD] : ab[A + AB.LNG];
   const pe = 1 + 0.5 * press * (1 - 0.03 * ab[A + AB.CMP]); // 圧力による蹴りの乱れ
   const ap = m.tac[k], wa = winMode(m, k), wv = 1 + WIN_K * wa, lw = LOSS_W * (1 - WIN_K * wa) * ap.lossK; // 奪った直後の窓・リスクの指示（標準は、倍率はすべて 1）
+  const lu = lureOf(ap, line); // 擬似カウンター: 相手を誘い込めた度合い（指示がなければ 0）
 
   let bV = -1e9, bt = 0, bj = -1, bdx = 0, bdy = 0, bpc = 0.5, bdist = 0, tag = 0;
   const consider = (V, type, j, dx, dy, pace, dist) => {
@@ -263,7 +270,9 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT], aw) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * ap.reliefK * press * p - (D > 26 ? ap.longPen - ap.longBon : 0) + (D < 14 ? ap.shortB : 0) + (dfx < fx - 3 ? ap.backB : 0) - ap.passCost;
+    let xtv = xt(dfx, dfy), lp = D > 26 ? ap.longPen - ap.longBon : 0;
+    if (lu > 0) { const sb = lu * clamp((dfx - line + 8) / 8, 0, 1); xtv *= 1 + LURE_X * sb; lp *= 1 - sb; } // 擬似カウンター: ライン裏への行き先を高く、長いパスの減点を外す
+    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xtv * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT], aw) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * ap.reliefK * press * p - lp + (D < 14 ? ap.shortB : 0) + (dfx < fx - 3 ? ap.backB : 0) - ap.passCost;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {

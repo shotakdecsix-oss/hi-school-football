@@ -10,7 +10,7 @@ import { BALL_EV, stepBall } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
 import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
-import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM } from './decide.js';
+import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM, lureOf } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 import { lagOf, blindOf } from './percept.js';
 import { markTouch } from './touchlog.js';
@@ -18,6 +18,9 @@ import { markTouch } from './touchlog.js';
 const BLIND = 3.5; // 認知: 気づいていない相手のタックルは、能力の差にこれだけ（能力の点数で）上乗せされる
 
 // 守備のライン（CB・SB・守備的MF）の持ち場の最低の深さ（自陣ゴールラインから m）は、指示（ライン高さ）から決まる m.tac[k].floorD（標準 13）。6ヤードボックスに張り付いて壁になるのを防ぐ
+// 後ろからつなぐ陣形（組み立て: つなぐ。指示 build<0 の強さ bsK を掛ける。ボールが自陣にあるとき、自陣の深くほど強い）: GKが前へ出る量(m)・CBが開く倍率（上限 m）・守備的MFが降りる深さ（自陣ゴールラインから m）と、その横位置（ボール側へ寄る割合）
+const BS_GK = 4, BS_CB = 0.5, BS_CBMAX = 14.5, BS_DROP = 25, BS_DROPY = 0.25;
+const bsW = (fx) => clamp((8 - fx) / 25.5, 0, 1); // 後ろの陣形が効く度合い: ボールが自陣の1/3（-17.5m）より後ろで 1、ハーフウェーの少し先（+8m）で 0
 const SB_UP = 15, SB_TUCK = 0.35; // SBの攻撃参加: ボール側で上がる量(m)・逆サイドで絞る割合（ボールが敵陣深くのとき最大）
 const REPLAN = 8, REACT = REACT_BASE; // REACT: 守備側がボールの動きを読んで反応し始めるまでの時間（秒）
 // 役割ごとに、ボールの位置に合わせて陣形がどれだけ前後するか（攻撃時／守備時）。順は G C S D M W A F
@@ -190,8 +193,9 @@ function assignAttack(m, k, dir, c, cpx, cpy, bfx, line) {
     act[a] = ACT.SUPPORT;
     supportSpot(m, k, a, dir, cpx, cpy, line, bl0, bl1);
   }
-  if (c >= 0 && cpx * dir > -25 - (wa > 0 ? 25 * wa : 0)) { // 縦に速く: 自陣深くからでも前線が走り出す。人数も増える（最大4人）。キープ: 走る人数が減る
-    const nRun = Math.max(0, (wa > 0 ? 2 + (wa > 0.35 ? 1 : 0) + (wa > 0.8 ? 1 : 0) : wa < -0.3 ? (wa < -0.8 ? 0 : 1) : 2) + m.tac[k].runPlus);
+  const lu = lureOf(m.tac[k], line); // 擬似カウンター: 相手を誘い込めた度合い（相手の最終ラインが高い）。強いほど、前線が自陣深くからでも裏へ走り出し、人数も増える
+  if (c >= 0 && cpx * dir > -25 - (wa > 0 ? 25 * wa : 0) - 25 * lu) { // 縦に速く: 自陣深くからでも前線が走り出す。人数も増える（最大4人）。キープ: 走る人数が減る
+    const nRun = Math.max(0, (wa > 0 ? 2 + (wa > 0.35 ? 1 : 0) + (wa > 0.8 ? 1 : 0) : wa < -0.3 ? (wa < -0.8 ? 0 : 1) : 2) + m.tac[k].runPlus + (lu > 0.3 ? 1 : 0) + (lu > 0.7 ? 1 : 0));
     for (let n = 0; n < nRun; n++) {
       let a = -1, ba = -1e9;
       for (let s = 1; s < 11; s++) {
@@ -268,7 +272,8 @@ function planGK(m, k, dir, own, att, bfx, bfy) {
     return;
   }
   const dgx = bfx + HL, dg = Math.sqrt(dgx * dgx + bfy * bfy) + 1e-6;
-  const up = tcOf(m, k).gkUp, gkd = att ? clamp(0.1 * dg, 2, 13) : clamp(0.12 * dg + 0.8 + up, 1.2, up > 0 ? 7 + up : 7); // 高いラインのときは、GKも前へ出て背後をカバーする
+  const up = tcOf(m, k).gkUp, bsK = m.tac[k].bsK;
+  const gkd = att ? clamp(0.1 * dg, 2, 13) + (bsK > 0 ? BS_GK * bsK * bsW(bfx) : 0) : clamp(0.12 * dg + 0.8 + up, 1.2, up > 0 ? 7 + up : 7); // 高いラインのときは、GKも前へ出て背後をカバーする。つなぐ組み立ては、攻めているときもGKが前へ出てつなぎの一員になる
   let fx = -HL + (dgx / dg) * gkd, fy = clamp((bfy / dg) * gkd, -GOAL_HW - 2, GOAL_HW + 2);
   pc[i] = 0.5;
   if (own < 0 && N[I.PHASE] === PHASE.LIVE) {
@@ -423,6 +428,9 @@ function planTeam(m, k, P, own, live) {
   const bfx = bx * dir, bfy = by * dir, sfx = F[SB] * dir, sfy = F[SB + 1] * dir, line = offsideLine(m, k), cx0 = m.cx0[k];
 
   // 動的な持ち場: 陣形を基準に、ボールの位置・攻守に合わせて前後左右に動かし、縦を詰める
+  const wB = att && ap.bsK > 0 ? bsW(sfx) : 0; // 後ろからつなぐ陣形の度合い
+  let drop = -1; // 降りる選手: 守備的MF（D）のうち陣形がいちばん深い1人（いなければ中央のMF）
+  if (wB > 0) { let bp = 9, bd = 2; for (let s = 1; s < 11; s++) { const i = j0 + s, r = role[i], pr = r === ROLE.D ? 0 : r === ROLE.M ? 1 : 9; if (pr < bp || (pr === bp && fd[i] < bd)) { bp = pr; bd = fd[i]; drop = i; } } }
   const compr = att ? 0.92 : tc.comprD;
   const shiftA = clamp(0.6 * (sfx - cx0) + 8, -8, 24), shiftD = clamp(0.55 * (sfx - cx0) - 2, -22, 8);
   for (let s = 1; s < 11; s++) {
@@ -435,6 +443,11 @@ function planTeam(m, k, P, own, live) {
       const w = clamp((sfx + 15) / 45, 0, 1), near = clamp(0.5 + (fl[i] > 0 ? sfy : -sfy) / 20, 0, 1);
       f += SB_UP * ap.sbUpK * w * (0.35 + 0.65 * near);
       g *= 1 - SB_TUCK * tc.tuckK * (1 - near) * w;
+    }
+    if (wB > 0) { // 後ろからつなぐ: CBが外へ開く（GKから見て横へ出る）・守備的MFがCBの前（ボール側寄り）へ降りる
+      const u = ap.bsK * wB;
+      if (r === ROLE.C) { const a = g < 0 ? -g : g, b = Math.min(a * (1 + BS_CB), Math.max(a, BS_CBMAX)), n = a + (b - a) * u; g = g < 0 ? -n : n; }
+      else if (i === drop) { f += (Math.min(f, -HL + BS_DROP) - f) * u; g += (BS_DROPY * sfy - g) * u; }
     }
     g = clamp(g + (sfy - g) * (att ? ap.farShift : tc.shiftY), -HW + 2, HW - 2); // 攻撃: 逆サイドの選手がボール側へ寄る割合（指示 幅。広いほど持ち場を保つ）
     if (att && ap.push !== 0) f += RISK_PUSH[r] * ap.push; // リスク: 冒険する(+)は全員が前へ出る（安全に(-)は少し控える）

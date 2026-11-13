@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node tools/test.js",
     "batch": "node tools/batch.js",
-    "golden": "node tools/golden.js --write"
+    "golden": "node tools/golden.js --write",
+    "style": "node tools/style.js"
   }
 }

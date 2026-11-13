@@ -14,6 +14,7 @@ import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PA
 import { decide } from '../engine/decide.js';
 import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
+import { STYLES } from '../data/styles.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
@@ -546,6 +547,52 @@ await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク�
   assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
   assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.4, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
   return `横幅 ${f(W1.wid)}/${f(b.wid)}/${f(W0.wid)}  持ち時間 ${f(T1.hold)}/${f(b.hold)}  大外 ${p(A1.wide)}/${p(b.wide)}/${p(A0.wide)}  後ろに残る ${f(R1.behind)}/${f(b.behind)}/${f(R0.behind)}`;
+});
+// 組み立て（build）の集計。チーム0だけに指示を与え、相手は標準。チーム0の外野手のグラウンダーのパスについて、本数・ロング（25m超）・後ろ向き（3m超）の割合と、クリア（大きく蹴り出す）の回数を数える
+function buildStats(tac, seeds, minutes = 15) {
+  const o = { pass: 0, long: 0, fwd: 0, lat: 0, back: 0, clr: 0 };
+  for (const seed of seeds) {
+    const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
+    let lastK = -1;
+    while (m.t < minutes * 1200 && stepMatch(m)) {
+      if (m.N[I.KICKT] === lastK) continue;
+      lastK = m.N[I.KICKT];
+      const ps = m.N[I.LAST];
+      if (m.N[I.RECV] < 0 || m.N[I.PASSK] !== 0 || ps < 0 || m.team[ps] !== 0 || m.slot[ps] === 0 || m.N[I.PHASE] !== PHASE.LIVE) continue;
+      const dx = (m.F[F_PASS] - m.F[F_B]) * dirOf(m.N, 0), dy = m.F[F_PASS + 1] - m.F[F_B + 1];
+      if (dx > 3) o.fwd++; else if (dx < -3) o.back++; else o.lat++;
+      if (dx * dx + dy * dy > 625) o.long++;
+    }
+    o.pass += m.N[I.ST + ST.PASS]; o.clr += m.N[I.ST + ST.CLR];
+  }
+  const n = seeds.length;
+  return { pass: o.pass / n, long: o.long / n, back: o.back / (o.fwd + o.lat + o.back), clr: o.clr / n };
+}
+await test('tactics: 組み立て（build）— 0 は標準のまま。+1 でロング・クリアが増え、−1 で減って後ろ向きのパスが増える', () => {
+  const z = tacParams({}), h = tacParams({ build: -1 }), d = tacParams({ build: 1 });
+  const neutral = { longPen: 0.012, longBon: 0, shortB: 0, backB: 0, clrK: 1, clrLoss: 0, gkFx: -22, reliefK: 1 };
+  for (const [k, v] of Object.entries(neutral)) assert.equal(z[k], v, k);
+  assert.ok(h.longPen > z.longPen && h.shortB > 0 && h.backB > 0 && h.clrK < 1 && h.clrLoss > 0 && h.gkFx > z.gkFx && h.reliefK > 1, 'つなぐ（−1）の向き');
+  assert.ok(d.longPen < z.longPen && d.longBon > 0 && d.shortB < 0 && d.clrK > 1 && d.reliefK < 1, '蹴る（+1）の向き');
+  const S = [1, 2, 3, 4, 5, 6, 7, 8];
+  const b = buildStats({}, S), h1 = buildStats({ build: -1 }, S), d1 = buildStats({ build: 1 }, S);
+  const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
+  // 8試合×15分で測ると ロング 1.8/3.1/7.4（0.6倍・2.4倍）、クリア 10.4/14.9/17.1、後ろ向き 38%/32%/32%、パス 182/142/104。ばらつくので、向きと余裕のある下限だけ見る
+  assert.ok(h1.long < b.long * 0.8 && d1.long > b.long * 1.5, `ロング(25m超)のパス つなぐ${f(h1.long)} 標準${f(b.long)} 蹴る${f(d1.long)}`);
+  assert.ok(h1.clr < b.clr * 0.9 && d1.clr > b.clr, `クリア つなぐ${f(h1.clr)} 標準${f(b.clr)} 蹴る${f(d1.clr)}`);
+  assert.ok(h1.back > b.back + 0.03, `後ろ向きのパスの割合 つなぐ${p(h1.back)} 標準${p(b.back)}`);
+  assert.ok(h1.pass > b.pass * 1.15 && d1.pass < b.pass * 0.85, `パス本数 つなぐ${f(h1.pass)} 標準${f(b.pass)} 蹴る${f(d1.pass)}`);
+  return `ロング ${f(h1.long)}/${f(b.long)}/${f(d1.long)}  クリア ${f(h1.clr)}/${f(b.clr)}/${f(d1.clr)}  後ろ向き ${p(h1.back)}/${p(b.back)}/${p(d1.back)}  パス ${f(h1.pass)}/${f(b.pass)}/${f(d1.pass)}（−1/0/+1。8試合の15分あたり）`;
+});
+await test('styles: チームの戦い方の型（標準・保持・直接）は、指示の項目と範囲に合っている', () => {
+  const keys = new Set(TACTICS.map((d) => d.key));
+  assert.deepEqual(Object.keys(STYLES), ['std', 'hold', 'direct']);
+  assert.deepEqual(STYLES.std.tac, {}, '標準は指示なし');
+  for (const [id, st] of Object.entries(STYLES)) {
+    assert.ok(typeof st.name === 'string' && st.name.length > 0, id + ' の名前');
+    for (const [k, v] of Object.entries(st.tac)) assert.ok(keys.has(k) && TACTICS.find((d) => d.key === k).on && v >= -1 && v <= 1, `${id}.${k}=${v}`);
+  }
+  assert.ok(STYLES.hold.tac.build < 0 && STYLES.direct.tac.build > 0, 'つなぐ型は build が負、直接は正');
 });
 await test('tactics: 攻撃の指示を0にすると、数値は標準のまま（全部の倍率が1・加点が0）。±1でその向きに動く', () => {
   const z = tacParams({});

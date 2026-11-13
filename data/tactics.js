@@ -2,7 +2,7 @@
 // lo は -1 側、hi は +1 側の意味。on は、いまのエンジンで効く項目（段階ごとにつないでいく）。
 // 理論の名前（ゲーゲンプレスなど）は、この指示の組み合わせ（おすすめ設定）として後から用意する。
 export const TACTICS = [
-  { key: 'build', group: '攻撃', name: '組み立て', lo: 'ショートパスでつなぐ', hi: 'ロングボールで進める', on: false },
+  { key: 'build', group: '攻撃', name: '組み立て', lo: 'ショートパスでつなぐ', hi: 'ロングボールで進める', on: true },
   { key: 'tempo', group: '攻撃', name: 'テンポ', lo: 'ゆっくり', hi: '速く', on: true },
   { key: 'width', group: '攻撃', name: '幅', lo: '狭く', hi: '広く', on: true },
   { key: 'attack', group: '攻撃', name: '攻め方', lo: '中央から', hi: 'サイドから', on: true },

@@ -258,7 +258,7 @@ export function decide(m, i) {
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
     }
-    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT], aw) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * press * p - (D > 26 ? 0.012 : 0) - ap.passCost;
+    const V = K_PASS * (p * (zoneCap(m, k, dir, dfx, dfy, pd, xt(dfx, dfy) * prsF(pd) * wv * latM(ap, dfx, dfy), 0.4 + 0.06 * ab[B + AB.SHT], aw) + KEEP) - (1 - p) * (lw * xt(-dfx, dfy) + KEEP)) + 0.012 * ap.reliefK * press * p - (D > 26 ? ap.longPen - ap.longBon : 0) + (D < 14 ? ap.shortB : 0) + (dfx < fx - 3 ? ap.backB : 0) - ap.passCost;
     consider(V, D <= 26 && !air ? 2 : 3, j, dx, dy);
   };
   for (let j = j0; j < j0 + 11; j++) {
@@ -266,7 +266,7 @@ export function decide(m, i) {
     const jx = px[j], jy = py[j], ddx = jx - x, ddy = jy - y, dd = Math.sqrt(ddx * ddx + ddy * ddy);
     if (dd < 4 || dd > vis) continue;
     if (aw && aw[j] <= f4(seed, t, i, 400 + j)) continue; // 認知: 見えている度合いが、そのときの候補に入る確率（見えていない味方には出せない。見えていれば必ず入る）
-    if (slot[j] === 0 && fx > -22) continue; // GKへ戻すのは自陣深くだけ
+    if (slot[j] === 0 && fx > ap.gkFx) continue; // GKへ戻すのは自陣深くだけ（組み立てがショートなら、自陣の半分ほどまで）
     if (jx * dir > line + 0.3) continue; // すでにオフサイドの位置の味方には出さない
     evalPass(j, false);
     if (sp !== SP.CORNER && ddx * dir > -3 && (role[j] >= ROLE.M || role[j] === ROLE.S)) evalPass(j, true);
@@ -288,8 +288,8 @@ export function decide(m, i) {
 
   // --- クリア（自陣で強く寄せられているとき）---
   if (!gk && sp === SP.NONE && fx < -28 && press > 0.4) {
-    consider(0.010 + 0.025 * press, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
-    consider(0.009 + 0.022 * press, 3, -1, x + dir * 12, y > 0 ? HW + 4 : -HW - 4); // 外（タッチライン）へ蹴り出す。相手ボールのスローインになる
+    consider(ap.clrK * (0.010 + 0.025 * press) - ap.clrLoss, 3, -1, x + dir * 36, clamp(y * 0.4, -20, 20));
+    consider(ap.clrK * (0.009 + 0.022 * press) - ap.clrLoss, 3, -1, x + dir * 12, y > 0 ? HW + 4 : -HW - 4); // 外（タッチライン）へ蹴り出す。相手ボールのスローインになる
   }
   if (bt === 0) { bt = 3; bj = -1; bdx = clamp(x + dir * 40, -HL + 3, HL - 3); bdy = clamp(y * 0.3, -25, 25); } // 選択肢が無いとき
 

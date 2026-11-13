@@ -48,13 +48,13 @@ let mods;
 try {
   mods = await Promise.all([
     import('../engine/match.js'), import('../engine/sample.js'), import('../engine/consts.js'),
-    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'), import('../data/tactics.js'),
+    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'), import('../data/tactics.js'), import('../data/styles.js'),
   ]);
 } catch (e) {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }] = mods;
+const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }, { STYLES }] = mods;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
@@ -68,6 +68,16 @@ const tacOf = (k) => Object.fromEntries(ON.map((d) => [d.key, +sliders[k][d.key]
 for (let k = 0; k < 2; k++) {
   const col = document.createElement('div');
   col.innerHTML = `<h4>チーム${k}（${k ? '青' : '赤'}）</h4>`;
+  const sb = document.createElement('div'); // スタイル（おすすめ設定）: 押すと、指示を一括で入れる（あとから個別に動かせる）
+  sb.style.margin = '0 0 6px';
+  for (const st of Object.values(STYLES)) {
+    const bt = document.createElement('button');
+    bt.textContent = st.name;
+    bt.style.cssText = 'font:inherit;padding:3px 8px;margin-right:4px;background:#21262d;color:inherit;border:1px solid #30363d;border-radius:4px';
+    bt.onclick = () => { for (const d of ON) { sliders[k][d.key].value = Math.round(2 * (st.tac[d.key] ?? 0)); sliders[k][d.key].oninput(); } };
+    sb.append(bt);
+  }
+  col.append(sb);
   for (const d of ON) {
     const row = document.createElement('div');
     row.className = 'row';

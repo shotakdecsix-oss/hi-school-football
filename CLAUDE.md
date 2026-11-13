@@ -20,6 +20,7 @@ engine/（試合エンジン・純粋JS）/ sim/（週進行など）/ data/ / u
 - 結果が変わる修正は `ENGINE_VERSION` を上げ、`npm run golden` で基準値を更新する。
 - チーム指示（`data/tactics.js` の13項目、-1〜+1、0=標準）は `engine/tactic.js` で数値にして `m.tac[k]` から読む。指示を足すときは、0 のとき従来と同じ動きにする（golden が変わらないこと）。その場合 `ENGINE_VERSION` は上げない。
 - 体力は `F[F_STA+選手]`（1=万全）。能力から決まる本来の最高速度・加速度は `m.vmax0`/`m.acc0`、`m.vmax`/`m.acc` は疲れを反映した値（`engine/stamina.js` の `fatigue` が毎tick作り直す）。能力を差し替えるときは vmax0/acc0 側を変える。
+- 組み立て（`build`。-1 つなぐ〜+1 蹴る）は decide.js のパス・クリアの価値に効く（`atkParams` の `longPen/longBon/shortB/backB/clrK/clrLoss/gkFx/reliefK`。0 で従来と同じ）。型（標準・保持・直接）は `data/styles.js`、型ごとの狙いの数字と測定は `tools/style.js`（`npm run style`。90分×48試合×3種で約5分。型を変えたら外れた項目が無いか見る）。
 - 切り替えの指示（失った直後・奪った直後）は、ボールを持つチームが替わった tick（`N[I.CHGT]`）から数秒の「窓」の間だけ効く。窓は takeControl のときだけ開く（再開・キックオフでは開かない）。
 - 認知（`engine/percept.js`。視野・体の向き・気づき・味方の記憶）は既定でオン。入力 `percept: 0` で外せる（比較用。基準値にも残す）。認知ありのときだけ F の後ろに `F_FACE`・`F_SCN`、N の後ろに味方を最後に見た tick（`N_LS`）を確保する。判断は `seeAll(m, i, full)` の見え方 `aw`（味方は「いま扇の中・近く10m」か「3秒以内に見た」ときだけ候補に入る。再開の最初のプレー（`full`）は全員分かる。見えていない相手は 4 割だけ数える）を使う。ボールを持つ選手は扇が 0.8 倍。見えていない側から寄せられるとタックルに弱い（`blindOf`）。
 - engine/ から render/・ui/・tools/・sim/ を import しない。

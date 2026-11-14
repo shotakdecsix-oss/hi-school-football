@@ -22,6 +22,7 @@ import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
 import { K_RD, K_MKL, K_OFL, K_WRK, K_SEP } from './geom.js';
 import { goalCredit } from './touchlog.js';
+import { buildZones } from './zones.js';
 
 // input = { seed, teams: [ { formation, tactics, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
 // players の並びがスロット（0=GK）。ab は能力32個の配列（engine/abil.js の順）。数値なら全能力が同じ値。bench は控え（省略可）。
@@ -74,11 +75,13 @@ export function createMatch(inp) {
     // 毎tick作り直す作業用（状態ではない）
     hx: new Float64Array(NP), hy: new Float64Array(NP), icT: new Float64Array(NP), icX: new Float64Array(NP), icY: new Float64Array(NP),
     bpx: new Float64Array(PRED_N + 1), bpy: new Float64Array(PRED_N + 1), bpz: new Float64Array(PRED_N + 1), bpb: new Float64Array(6),
+    zn: [null, null], zr: new Float64Array(NP * 4), zw: new Float64Array(3), // ゾーン配置（v21）: 陣形の領域の表（入力 zones が 0 でなく表があるときだけ）・毎tick作り直す各選手の領域（作業用）・局面の混ぜ具合（作業用）
     pa: new Uint8Array(NP), mpi: new Int16Array(128), mpo: new Int16Array(128), mpd: new Float64Array(128), usedO: new Uint8Array(NP),
   };
   for (let i = 0; i < NP; i++) F[F_STA + i] = 1; // 全員が万全で始まる
   for (let k = 0; k < 2; k++) {
     const T = input.teams[k], form = FORMATIONS[T.formation];
+    m.zn[k] = input.zones === 0 ? null : buildZones(T.formation);
     let sx = 0, deepest = -1;
     for (let s = 0; s < 11; s++) {
       const i = k * 11 + s;

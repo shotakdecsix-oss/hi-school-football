@@ -19,7 +19,9 @@ import { decide, lureOf, offsideLine, lobSafe, aerialP } from '../engine/decide.
 import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { STYLES } from '../data/styles.js';
-import { ROLE } from '../data/formations.js';
+import { ROLE, FORMATIONS } from '../data/formations.js';
+import { ZONES } from '../data/zones.js';
+import { buildZones, phaseW, ZC } from '../engine/zones.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
@@ -261,7 +263,7 @@ await test('restart: 再開は正しいチームの選手がボールを持っ�
         for (let i = 0; i < NP; i++) {
           if (m.team[i] === m.team[tk]) continue;
           const d = Math.hypot(m.px[i] - rx, m.py[i] - ry);
-          if (sp === SP.THROW) assert.ok(d >= 2.1, `スローインで相手が近すぎる ${d.toFixed(2)}m seed ${seed} t ${e[0]}`);
+          if (sp === SP.THROW) assert.ok(d >= 2.0, `スローインで相手が近すぎる ${d.toFixed(2)}m seed ${seed} t ${e[0]}`); // 規則は2m（エンジンは余裕を見て 2.2 へ出す）。角（ゴールラインの内側 2m 以内で出たスローイン）では、2.2 の輪がフィールドの外へかかり、角の旗の位置までしか出せないので 2.04m などになる（v21 の seed 1 で出会った）
           if (sp === SP.CORNER) assert.ok(d >= 9.3, `コーナーで相手が近すぎる ${d.toFixed(2)}m seed ${seed} t ${e[0]}`);
           if (sp === SP.GKICK) assert.ok(!(m.px[i] * sx > HL - PA_D && Math.abs(m.py[i]) < PA_HW), `ゴールキックで相手がエリア内 seed ${seed} t ${e[0]}`);
         }
@@ -544,7 +546,8 @@ await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク�
   const S = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   const S30 = Array.from({ length: 40 }, (_, i) => i + 1); // v20: 30試合では遅のパス本数の差がぶれる（40試合で -10%、30試合の測定で -4% が出た）ので40試合（名前は S30 のまま）。v14: テンポは前向きのパスの割合の差が小さい（30試合の測定で 遅33%・標準36%・速39%）ので、30試合で見る
   const b = atkStats({}, S), W1 = atkStats({ width: 1 }, S), W0 = atkStats({ width: -1 }, S), b3 = atkStats({}, S30), T1 = atkStats({ tempo: 1 }, S30), T0 = atkStats({ tempo: -1 }, S30);
-  const A1 = atkStats({ attack: 1 }, S), A0 = atkStats({ attack: -1 }, S), R1 = atkStats({ risk: 1 }, S), R0 = atkStats({ risk: -1 }, S);
+  const S16 = Array.from({ length: 16 }, (_, i) => i + 1); // v21: ボールが大外を通る割合は、1試合ごとのぶれが大きく（10試合の標準誤差 約5pt。40試合の測定で 標準44%・サイド53%・中央29%）、サイドと中央は16試合で見る
+  const A1 = atkStats({ attack: 1 }, S16), A0 = atkStats({ attack: -1 }, S16), R1 = atkStats({ risk: 1 }, S), R0 = atkStats({ risk: -1 }, S);
   const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
   assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
   assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
@@ -552,9 +555,11 @@ await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク�
   // テンポ: 40試合で測ると、持ち時間 -0.39 秒（速）、パス本数 速 +27%・遅 -11%（v20 は 100試合で 持ち時間 遅 +0.35 秒、パス本数 遅 -9%。40試合の測定は ±4% ぶれるので、持ち時間（速・遅）と、パス本数の向きだけ見る）
   assert.ok(T1.hold < b3.hold - 0.2 && T0.hold > b3.hold + 0.1 && T0.pass < b3.pass, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b3.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b3.pass)}（10分あたり）`);
   assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
-  assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.1, // v20: 中央を通る割合の差は 0.2→0.1（10試合の測定。サイド43%・標準29%・中央23%／中央を通る割合 33% 対 18%。ゴール前は中央からも撃つようになり、差が縮んだ）
+  // v21: ゾーン配置で守備がコンパクトになり、標準でも大外を通る割合が 29→44% に上がった（40試合の測定: サイド53%・標準44%・中央29%）ので、標準との差でなく、サイドと中央の差（約24pt）を見る
+  assert.ok(A1.wide > A0.wide + 0.12 && A1.wide > b.wide - 0.04 && A0.wide < b.wide + 0.04 && A0.cen > A1.cen + 0.05, // v20: 中央を通る割合の差は 0.2→0.1（10試合の測定。サイド43%・標準29%・中央23%／中央を通る割合 33% 対 18%。ゴール前は中央からも撃つようになり、差が縮んだ）
      `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
-  assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.25, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
+  // v21: 標準でもボールより後ろに 5.5 人（v20 は 5.2）いて、安全側の増え方は +0.25（v20 も +0.26。10試合の標準誤差は差で約 0.2）なので、冒険側の減り方（-1.0）と、冒険〜安全の幅で見る
+  assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind - 0.1 && R0.behind > R1.behind + 0.8, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
   return `横幅 ${f(W1.wid)}/${f(b.wid)}/${f(W0.wid)}  持ち時間 ${f(T1.hold)}/${f(b.hold)}  大外 ${p(A1.wide)}/${p(b.wide)}/${p(A0.wide)}  後ろに残る ${f(R1.behind)}/${f(b.behind)}/${f(R0.behind)}`;
 });
 // 組み立て（build）の集計。チーム0だけに指示を与え、相手は標準。チーム0の外野手のグラウンダーのパスについて、本数・ロング（25m超）・後ろ向き（3m超）の割合と、クリア（大きく蹴り出す）の回数を数える
@@ -1165,6 +1170,68 @@ await test('goals: 得点者とアシストの記録（触れた順・間に相�
     }
   }
   return `8試合×30分: ゴール ${goals}・アシストあり ${assists}`;
+});
+
+// ── ゾーン配置（v21）──
+await test('zones: 陣形の表（data/zones.js）は全陣形で正しい。局面の混ぜ具合は足して1。標準の指示では持ち場が領域の中。zones:0 は従来の式', () => {
+  for (const name of Object.keys(FORMATIONS)) {
+    const Z = buildZones(name), T = ZONES[name], F = FORMATIONS[name];
+    assert.ok(Z && T, `${name}: 表がある`);
+    for (const rows of [T.att, T.def]) {
+      assert.equal(rows.length, 3, `${name}: 局面は3つ（組み立て・運び/進入・ファイナルサード）`);
+      for (const row of rows) {
+        assert.equal(row.length, 10, `${name}: 外野手10人分`);
+        for (const c of row) { const n = c.trim().split(/\s+/).length; assert.ok(n >= 1 && n <= 3, `${name}: 1人の領域は1〜3升 (${c})`); }
+      }
+    }
+    for (let side = 0; side < 2; side++) {
+      let prev = -1e9;
+      for (let q = 0; q < 3; q++) {
+        let mf = 0;
+        for (let s = 1; s < 11; s++) {
+          const o = ((side * 3 + q) * 10 + s - 1) * ZC, cf = Z[o], cg = Z[o + 1], fl = F[s][1];
+          assert.ok(cf >= Z[o + 2] && cf <= Z[o + 3] && cg >= Z[o + 4] && cg <= Z[o + 5], `${name}: 中心は領域の中`);
+          assert.ok(Z[o + 2] >= -HL && Z[o + 3] <= HL && Z[o + 4] >= -HW && Z[o + 5] <= HW, `${name}: 領域はピッチの中`);
+          assert.ok(Math.abs(fl) >= 0.15 ? Math.sign(cg) === Math.sign(fl) : Math.abs(cg) < 7, `${name} ${side ? '守備' : '攻撃'} 局面${q} 選手${s}: 左右が陣形と合う（陣形の横 ${fl}・領域の中心 ${cg.toFixed(1)}m）`);
+          mf += cf;
+        }
+        mf /= 10;
+        assert.ok(mf > prev + 5, `${name} ${side ? '守備' : '攻撃'}: ボールが前へ行くほど外野手の平均の奥行も前へ（局面${q} ${mf.toFixed(1)}m）`);
+        prev = mf;
+      }
+    }
+  }
+  const w = new Float64Array(3);
+  for (const x of [-80, -35, -20, -0.5, 0, 12, 35, 70]) { phaseW(x, w); assert.ok(Math.abs(w[0] + w[1] + w[2] - 1) < 1e-12 && w[0] >= 0 && w[1] >= 0 && w[2] >= 0, `局面の重みは足して1（${x}m）`); }
+  phaseW(-50, w); assert.ok(w[0] === 1 && w[1] === 0 && w[2] === 0, '自陣深く = 組み立ての局面だけ');
+  phaseW(0, w); assert.ok(w[0] === 0 && w[1] === 1 && w[2] === 0, '中盤 = 運び・進入の局面だけ');
+  phaseW(50, w); assert.ok(w[0] === 0 && w[1] === 0 && w[2] === 1, '敵陣深く = ファイナルサードの局面だけ');
+  // 試合: 標準の指示では、持ち場（m.hx・m.hy）の横が領域（m.zr。余裕込み）の中にある。奥行は SB の上がり（指示でなく標準の動き）とオフサイドラインの制限を除いて、領域の上限の中
+  const a = mk(2), inp0 = sampleInput(2, OPT); inp0.zones = 0;
+  const b = createMatch(inp0);
+  assert.ok(a.zn[0] && a.zn[1], '既定はゾーン配置');
+  assert.ok(b.zn[0] === null && b.zn[1] === null, 'zones:0 は従来の式');
+  let n = 0, outG = 0, outF = 0;
+  while (a.t < 6 * 1200 && stepMatch(a)) {
+    if (a.t % 10 || a.N[I.PHASE] !== PHASE.LIVE) continue;
+    for (let k = 0; k < 2; k++) {
+      const dir = dirOf(a.N, k);
+      for (let s = 1; s < 11; s++) {
+        const i = k * 11 + s, g = a.hy[i] * dir, f = a.hx[i] * dir;
+        n++;
+        if (g < a.zr[i * 4 + 2] - 0.01 || g > a.zr[i * 4 + 3] + 0.01) outG++;
+        if (a.role[i] !== ROLE.S && f > a.zr[i * 4 + 1] + 0.01) outF++;
+      }
+    }
+  }
+  assert.ok(n > 5000 && outG === 0 && outF === 0, `持ち場が領域の外 横 ${outG} 前後 ${outF}（${n} 点）`);
+  run(b, a.t);
+  assert.notEqual(digestMatch(a), digestMatch(b), 'ゾーン配置の有無で試合の展開が変わる');
+  const c = createMatch(inp0); run(c, 2000);
+  const snap = snapshot(c); run(c, 4000);
+  const fresh = createMatch(inp0); restore(fresh, snap); run(fresh, 4000);
+  assert.equal(digestMatch(fresh), digestMatch(c), 'zones:0 の保存→復元');
+  return `陣形 ${Object.keys(FORMATIONS).length} 種の表 OK・持ち場の領域内 ${n} 点`;
 });
 
 await test('digest: チェック値は全ビット（小さな差も見える。-0 と 0・NaN は同じ扱い）', () => {

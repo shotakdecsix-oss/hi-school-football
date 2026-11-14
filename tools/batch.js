@@ -6,6 +6,7 @@
 // --tacH / --tacA: 家（チーム0）・相手（チーム1）のチーム指示（data/tactics.js のキー=-1〜1 をカンマ区切り。例 line=1,pressPower=0.5）。
 //   指示を与えるか --def を付けると、守備のブロック（相手が保持しているときの陣形）の表も出す
 // --noPercept: 認知（向き・視野・気づき）なしで走らせる（全員が全部見えている従来の動き。比較用）
+// --zones 0: ゾーン配置（v21）を外して、従来（v20）の持ち場の式で走らせる（比較用）
 import { createMatch, stepMatch, run, digestMatch } from '../engine/match.js';
 import { sampleInput } from '../engine/sample.js';
 import { I, ST, ST_N, NP, HL, HW, PHASE, EV, ACT, F_B, F_PASS, F_STA, F_SCN, dirOf } from '../engine/consts.js';
@@ -34,11 +35,16 @@ const showDef = process.argv.includes('--def') || Object.keys(tacH).length + Obj
 const o = { home: arg('home', '4-4-2'), away: arg('away', '4-4-2'), abilHome: +arg('ha', 10), abilAway: +arg('aa', 10), rules, homeTac: tacH, awayTac: tacA, percept: process.argv.includes('--noPercept') ? 0 : 1 };
 const SAMPLE_EVERY = 10; // 0.5 秒ごとに動きを測る
 
+const zonesOff = +arg('zones', 1) === 0; // v21: --zones 0 でゾーン配置を外し、従来（v20）の式で走らせる（比較用）
 const mkInput = (seed) => {
-  if (!flat) return sampleInput(seed, o);
-  const team = (f, a, tactics) => ({ formation: f, tactics, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
-  const inp = { seed, changes: [], rules, teams: [team(o.home, o.abilHome, tacH), team(o.away, o.abilAway, tacA)] };
-  if (!o.percept) inp.percept = 0;
+  let inp;
+  if (!flat) inp = sampleInput(seed, o);
+  else {
+    const team = (f, a, tactics) => ({ formation: f, tactics, players: Array.from({ length: 11 }, (_, s) => ({ id: 'x' + s, ab: a })) });
+    inp = { seed, changes: [], rules, teams: [team(o.home, o.abilHome, tacH), team(o.away, o.abilAway, tacA)] };
+    if (!o.percept) inp.percept = 0;
+  }
+  if (zonesOff) inp.zones = 0;
   return inp;
 };
 

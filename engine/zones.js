@@ -22,9 +22,10 @@ function region(str) {
 }
 
 // 陣形 name の領域の表。Float64Array[((side×3 + q)×10 + (s−1)) × ZC + c]。side 0=攻撃・1=守備、q 0..2 = ボールが低い（自陣側）→ 中間 → 高い（敵陣側）の順
-// （data/zones.js の守備は「相手のビルドアップ（ボールが高い）」から書いてあるので、ここで逆にする）。表のない陣形は null（従来の持ち場の式を使う）
-export function buildZones(name) {
-  const Z = ZONES[name];
+// （data/zones.js の守備は「相手のビルドアップ（ボールが高い）」から書いてあるので、ここで逆にする）。表のない陣形は null（従来の持ち場の式を使う）。
+// custom = 入力の teams[k].zones（{att, def}。data/zones.js の1陣形ぶんと同じ形）があれば、陣形の表の代わりにそれを使う（ビューアのゾーン編集用）
+export function buildZones(name, custom) {
+  const Z = custom || ZONES[name];
   if (!Z) return null;
   const out = new Float64Array(2 * 3 * 10 * ZC);
   for (let side = 0; side < 2; side++) {
@@ -32,7 +33,7 @@ export function buildZones(name) {
     if (!T || T.length !== 3) throw new Error('局面は3つ必要です: ' + name);
     for (let q = 0; q < 3; q++) {
       const row = T[side === 0 ? q : 2 - q];
-      if (row.length !== 10) throw new Error('スロットは10人分必要です: ' + name);
+      if (!row || row.length !== 10) throw new Error('スロットは10人分必要です: ' + name);
       for (let s = 0; s < 10; s++) out.set(region(row[s]), ((side * 3 + q) * 10 + s) * ZC);
     }
   }

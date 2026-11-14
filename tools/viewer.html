@@ -10,7 +10,26 @@
   #bar input, #bar select, #bar button { font: inherit; padding: 3px 6px; background: #21262d; color: inherit; border: 1px solid #30363d; border-radius: 4px; }
   #bar input[type=number] { width: 4.2em; }
   #score { margin-left: auto; font-weight: 700; font-size: 16px; }
-  svg { display: block; width: 100vw; height: calc(100vh - 44px); }
+  #sv { display: block; width: 100%; height: min(67.3vw, calc(100vh - 44px)); }
+  #main { display: flex; flex-direction: column; }
+  #main > #sv { position: sticky; top: 0; z-index: 2; background: #0d1117; } /* 細い画面: ピッチを上に留めて、下のゾーン編集を見ながら試合も見る */
+  #zn { background: #161b22; border-top: 1px solid #30363d; padding: 0 8px; }
+  #zn summary { padding: 5px 0; cursor: pointer; }
+  #znBody { display: flex; flex-wrap: wrap; gap: 8px 14px; padding-bottom: 10px; }
+  #znSv { display: block; width: min(100%, 300px); height: auto; flex: 0 0 auto; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+  #znCtl { flex: 1 1 240px; min-width: 0; }
+  .zr { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; align-items: center; font-size: 12px; }
+  .zr button { font: inherit; padding: 4px 8px; background: #21262d; color: inherit; border: 1px solid #30363d; border-radius: 4px; }
+  .zr button.on { background: #1f6feb; border-color: #388bfd; }
+  .zr button.go { background: #238636; border-color: #2ea043; font-weight: 700; }
+  .zh { font-size: 11px; opacity: .75; margin: 0 0 6px; }
+  #znTxt { width: 100%; box-sizing: border-box; font: 11px/1.35 ui-monospace, monospace; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; white-space: pre; overflow: auto; }
+  @media (min-width: 900px) and (min-aspect-ratio: 5/4) { /* 広い画面: ピッチの右に、ゾーン編集を横に並べる */
+    #main { flex-direction: row; align-items: flex-start; }
+    #main > #sv { position: static; flex: 1 1 0; min-width: 0; width: auto; height: calc(100vh - 44px); }
+    #zn { flex: 0 0 340px; max-height: calc(100vh - 44px); overflow: auto; border-top: 0; border-left: 1px solid #30363d; box-sizing: border-box; }
+    #zn:not([open]) { flex: 0 0 auto; }
+  }
   #tac { background: #161b22; border-top: 1px solid #30363d; padding: 0 8px; }
   #tac summary { padding: 5px 0; cursor: pointer; }
   #tacBody { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; padding-bottom: 8px; }
@@ -41,20 +60,26 @@
   <div id="tacBody"></div>
   <button id="tacReset" style="margin:0 0 8px;font:inherit;padding:3px 8px;background:#21262d;color:inherit;border:1px solid #30363d;border-radius:4px">全部標準に戻す</button>
 </details>
+<div id="main">
 <svg id="sv" preserveAspectRatio="xMidYMid meet"></svg>
+<details id="zn"><summary>ゾーン配置（自分で設定）<small id="znTag" style="opacity:.7"></small></summary>
+  <div id="znBody"></div>
+</details>
+</div>
 <script type="module">
 // 読み込みに失敗したとき画面にエラーが出るよう、動的importにしている
 let mods;
 try {
   mods = await Promise.all([
     import('../engine/match.js'), import('../engine/sample.js'), import('../engine/consts.js'),
-    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'), import('../data/tactics.js'), import('../data/styles.js'),
+    import('../data/formations.js'), import('../render/view2d.js'), import('../data/rules.js'), import('../data/tactics.js'), import('../data/styles.js'), import('../render/zoneedit.js'),
   ]);
 } catch (e) {
   document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f85149;padding:12px;white-space:pre-wrap">読み込みエラー: ' + e + '</pre>');
   throw e;
 }
-const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }, { STYLES }] = mods;
+const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ, dirOf }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }, { STYLES }, ZE] = mods;
+const { ZMAX, QLAB, QHINT, tabOk, tabDefault, toggleCell, tabText, gridSvg, slotLabel, slotColor } = ZE;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
@@ -93,17 +118,79 @@ for (let k = 0; k < 2; k++) {
 $('tacReset').onclick = () => { for (let k = 0; k < 2; k++) for (const d of ON) { sliders[k][d.key].value = 0; sliders[k][d.key].oninput(); } };
 const sv = $('sv');
 sv.setAttribute('viewBox', VIEWBOX);
-sv.innerHTML = pitchSvg() + '<g id="act"></g>';
-const act = $('act');
+sv.innerHTML = pitchSvg() + '<g id="zov"></g><g id="act"></g>';
+const act = $('act'), zov = $('zov');
 $('legend').textContent = ROLE_LEGEND;
 
 let m, prev, cur, vp = -1, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '', ended = false;
+
+// ── ゾーン編集（自分で設定）: 升をタップして選手ごとの領域を決め、その表で試合を動かす。表はこの端末（localStorage）に保存。チームごと・陣形ごとに別 ──
+let zK = 0, zSide = 0, zQ = 1, zS = 0; // 編集中のチーム・攻(0)/守(1)・局面・選手（0..9 = 外野手のスロット1..10）
+const zUse = [false, false], zTabs = [{}, {}]; // zUse[k] = そのチームは自分の表で動かす
+const zFm = (k) => $(k ? 'af' : 'hf').value, zKey = (k) => `zn1:${k}:${zFm(k)}`;
+function zTab(k) { // チーム k のいまの陣形の表（自分の表。まだ無ければ標準の複製）
+  const f = zFm(k);
+  if (!zTabs[k][f]) {
+    let t = null;
+    try { t = JSON.parse(localStorage.getItem(zKey(k))); } catch {}
+    zTabs[k][f] = tabOk(t) ? t : tabDefault(f);
+  }
+  return zTabs[k][f];
+}
+const zSave = (k) => { try { localStorage.setItem(zKey(k), JSON.stringify(zTab(k))); } catch {} };
+function znRender() {
+  const f = zFm(zK), t = zTab(zK), bt = (kind, v, label, on) => `<button data-z="${kind}:${v}" class="${on ? 'on' : ''}">${label}</button>`;
+  const chips = Array.from({ length: 10 }, (_, s) => `<button data-z="s:${s}" class="${s === zS ? 'on' : ''}" style="border-left:4px solid ${slotColor(f, s)}">${s + 1} ${slotLabel(f, s)}</button>`).join('');
+  $('znBody').innerHTML = gridSvg(f, t, zSide, zQ, zS) + `<div id="znCtl">
+    <div class="zr">${[0, 1].map((k) => bt('k', k, `${k ? '青' : '赤'} ${zFm(k)}${zUse[k] ? '・自分の表' : ''}`, k === zK)).join('')}</div>
+    <label class="zr"><input type="checkbox" data-z="use:0" ${zUse[zK] ? 'checked' : ''}> この表で動かす（${zK ? '青' : '赤'}）。オフ = 標準の表</label>
+    <div class="zr">${bt('side', 0, '攻撃', !zSide)}${bt('side', 1, '守備', zSide)}</div>
+    <div class="zr">${QLAB[zSide].map((l, q) => bt('q', q, l, q === zQ)).join('')}</div>
+    <div class="zh">${QHINT[zSide]}</div>
+    <div class="zr">${chips}</div>
+    <div class="zh">升をタップ → 選んだ選手の領域に足す／外す（1〜${ZMAX}升。多く足すと古い升が外れる）。点線の四角が領域（この外側へは出ない）、丸が立つ目安。ピッチの選手をクリックしても選べる。</div>
+    <div class="zr">${bt('rq', 0, 'この局面を標準に')}${bt('rall', 0, 'この陣形を全部標準に')}</div>
+    <div class="zr"><button data-z="go:0" class="go">反映して最初から</button><button data-z="copy:0">表をコピー</button><small id="znMsg"></small></div>
+    <textarea id="znTxt" readonly rows="14" spellcheck="false">${tabText(f, t)}</textarea></div>`;
+  $('znTag').textContent = zUse[0] || zUse[1] ? '　使用中: ' + [zUse[0] && '赤', zUse[1] && '青'].filter(Boolean).join('・') : '';
+}
+$('znBody').onclick = async (e) => {
+  const el = e.target.closest('[data-z]');
+  if (!el) return;
+  const [kind, v] = el.dataset.z.split(':'), f = zFm(zK), side = zSide ? 'def' : 'att';
+  if (kind === 'k') zK = +v;
+  else if (kind === 'use') zUse[zK] = el.checked;
+  else if (kind === 'side') zSide = +v;
+  else if (kind === 'q') zQ = +v;
+  else if (kind === 's') zS = +v;
+  else if (kind === 'c') { const r = zTab(zK)[side]; r[zQ][zS] = toggleCell(r[zQ][zS], v); zUse[zK] = true; zSave(zK); } // 触ったら、そのチームは自分の表で動かす
+  else if (kind === 'rq') { zTab(zK)[side][zQ] = tabDefault(f)[side][zQ]; zSave(zK); }
+  else if (kind === 'rall') { zTabs[zK][f] = tabDefault(f); zUse[zK] = false; try { localStorage.removeItem(zKey(zK)); } catch {} }
+  znRender();
+  if (kind === 'go') start();
+  if (kind === 'copy') {
+    const ta = $('znTxt');
+    ta.select();
+    let ok = false;
+    try { await navigator.clipboard.writeText(ta.value); ok = true; } catch { try { ok = document.execCommand('copy'); } catch {} }
+    $('znMsg').textContent = ok ? 'コピーしました' : '下の表を長押しで選んでコピーしてください';
+  }
+};
+$('hf').onchange = $('af').onchange = znRender;
+function znOverlay() { // 編集中の選手の、いまの領域（ボール位置で3局面を混ぜたもの。余白込み）と持ち場の十字を、ピッチに重ねる
+  const i = zK * 11 + zS + 1, a = m.zr, d = dirOf(m.N, zK);
+  if (!$('zn').open || !(a[i * 4 + 1] > a[i * 4])) { if (zov.innerHTML) zov.innerHTML = ''; return; }
+  const x0 = a[i * 4] * d, x1 = a[i * 4 + 1] * d, y0 = a[i * 4 + 2] * d, y1 = a[i * 4 + 3] * d, c = zK ? '#6ea8ff' : '#ff6b60', hx = m.hx[i], hy = m.hy[i];
+  zov.innerHTML = `<rect x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" fill="${c}" fill-opacity=".12" stroke="${c}" stroke-width=".35" stroke-dasharray="1.4 1"/><path d="M${hx - 1.3} ${hy}h2.6M${hx} ${hy - 1.3}v2.6" stroke="${c}" stroke-width=".4"/>`;
+}
 const PERIOD = ['', '前半', '後半', '延長前半', '延長後半', 'PK戦'], BREAK = ['', 'ハーフタイム', '延長へ', '延長ハーフタイム', 'PK戦へ'], PKRES = ['外れ', 'ゴール！', 'セーブ！'];
 function start() {
-  m = createMatch(sampleInput(+$('seed').value || 1, {
+  const inp = sampleInput(+$('seed').value || 1, {
     home: $('hf').value, away: $('af').value, abilHome: +$('ha').value, abilAway: +$('aa').value, rules: RULES[$('rl').value],
     homeTac: tacOf(0), awayTac: tacOf(1), percept: $('pc').checked ? undefined : 0,
-  }));
+  });
+  for (let k = 0; k < 2; k++) if (zUse[k]) inp.teams[k].zones = zTab(k); // 自分の表（ゾーン編集）で動かすチーム
+  m = createMatch(inp);
   vp = -1;
   prev = cur = frame(m, vp);
   acc = 0; holdUntil = 0; banner = ''; ended = false;
@@ -119,6 +206,7 @@ sv.onclick = (e) => { // 選手をクリック → その選手の目線（も�
   for (let i = 0; i < 22; i++) { const dx = cur.xy[2 * i] - q.x, dy = cur.xy[2 * i + 1] - q.y, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } }
   vp = best >= 0 && best !== vp ? best : -1;
   cur = frame(m, vp);
+  if (best % 11 > 0 && best >= 0) { zK = best < 11 ? 0 : 1; zS = best % 11 - 1; znRender(); } // ゾーン編集の選手も、クリックした選手にする（GK は表が別なので除く）
 };
 $('pz').onclick = () => { paused = !paused; $('pz').textContent = paused ? '再開' : '一時停止'; };
 for (const s of [1, 4, 16, 60]) {
@@ -144,6 +232,7 @@ function loop(now) {
     if (n >= 1500) acc = 0;
     if (now >= holdUntil && banner && !ended) banner = '';
   }
+  znOverlay();
   act.innerHTML = actorsSvg(lerpFrame(prev, cur, Math.min(1, acc / DT)), $('roles').checked, { view: +$('vw').value });
   const sec = Math.floor(cur.t / TICK_HZ);
   $('score').textContent = `${cur.score[0]} - ${cur.score[1]}   ${PERIOD[cur.half]}${cur.half === 5 ? ` ${cur.pk[0]} - ${cur.pk[1]}` : ` ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`}${banner ? '　' + banner : ''}`;
@@ -151,6 +240,7 @@ function loop(now) {
   $('sta').textContent = `体力 赤${Math.round(100 * staminaOf(m, 0))}% 青${Math.round(100 * staminaOf(m, 1))}%`;
   requestAnimationFrame(loop);
 }
+znRender();
 start();
 requestAnimationFrame(loop);
 </script>

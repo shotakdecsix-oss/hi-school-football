@@ -22,6 +22,7 @@ import { STYLES } from '../data/styles.js';
 import { ROLE, FORMATIONS } from '../data/formations.js';
 import { ZONES } from '../data/zones.js';
 import { buildZones, phaseW, ZC } from '../engine/zones.js';
+import { ZMAX, tabOk, tabDefault, toggleCell, regionOf, tabText, gridSvg, slotLabel, slotColor } from '../render/zoneedit.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
@@ -1232,6 +1233,105 @@ await test('zones: 陣形の表（data/zones.js）は全陣形で正しい。局
   const fresh = createMatch(inp0); restore(fresh, snap); run(fresh, 4000);
   assert.equal(digestMatch(fresh), digestMatch(c), 'zones:0 の保存→復元');
   return `陣形 ${Object.keys(FORMATIONS).length} 種の表 OK・持ち場の領域内 ${n} 点`;
+});
+
+// ゾーン編集（teams[k].zones）: 陣形の表の代わりに、チームごとの領域の表を差し込める（ビューアのゾーン編集用）
+await test('zones-custom: teams[k].zones で領域の表を差し込める。陣形の表と同じなら同一・変えれば持ち場が従う・不正な表は例外・zones:0 が優先', () => {
+  // 1) 陣形の表をそのまま入れても、入れなくても、数値も試合も同じ
+  assert.deepEqual(Array.from(buildZones('4-4-2', ZONES['4-4-2'])), Array.from(buildZones('4-4-2')), '同じ表なら同じ数値');
+  const inpA = sampleInput(3, OPT), inpB = sampleInput(3, OPT);
+  inpB.teams[0].zones = ZONES['4-4-2']; inpB.teams[1].zones = ZONES['4-3-3'];
+  const A = createMatch(inpA), B = createMatch(inpB);
+  run(A, 2400); run(B, 2400);
+  assert.equal(digestMatch(A), digestMatch(B), '陣形の表をそのまま差し込んでも試合は同じ（既定は動かない）');
+  assert.notEqual(inpB.teams[0].zones, B.input.teams[0].zones, '入力は複製される');
+  assert.deepEqual(inpB.teams[0].zones, B.input.teams[0].zones, '複製の中身は同じ');
+  // 2) 左右を入れ替えた表（レーン a↔e・b↔d）: 領域の中心の横が正負反転。標準の指示では持ち場の横が新しい領域の中。左SBは右側に立つ
+  const mir = (row) => row.map((c) => c.trim().split(/\s+/).map((x) => x[0] + 'edcba'['abcde'.indexOf(x[1])]).join(' '));
+  const MZ = { att: ZONES['4-4-2'].att.map(mir), def: ZONES['4-4-2'].def.map(mir) };
+  const Zd = buildZones('4-4-2'), Zm = buildZones('4-4-2', MZ);
+  for (let o = 0; o < Zd.length; o += ZC) {
+    assert.ok(Math.abs(Zm[o] - Zd[o]) < 1e-9 && Math.abs(Zm[o + 1] + Zd[o + 1]) < 1e-9, '奥行はそのまま・横の中心は反転');
+    assert.ok(Math.abs(Zm[o + 4] + Zd[o + 5]) < 1e-9 && Math.abs(Zm[o + 5] + Zd[o + 4]) < 1e-9, '横の範囲も反転');
+  }
+  const inpM = sampleInput(2, OPT); inpM.teams[0].zones = MZ;
+  const D = mk(2), E = createMatch(inpM);
+  assert.ok(E.zn[0] && E.zn[1], '差し込んだ表で配置の表ができる');
+  let n = 0, outG = 0, sumD = 0, sumE = 0, cnt = 0;
+  while (D.t < 6 * 1200 && stepMatch(D) && stepMatch(E)) {
+    if (E.t % 10 || E.N[I.PHASE] !== PHASE.LIVE) continue;
+    const dir = dirOf(E.N, 0);
+    for (let s = 1; s < 11; s++) {
+      const i = s, g = E.hy[i] * dir;
+      n++;
+      if (g < E.zr[i * 4 + 2] - 0.01 || g > E.zr[i * 4 + 3] + 0.01) outG++;
+    }
+    sumD += D.hy[1] * dirOf(D.N, 0); sumE += E.hy[1] * dirOf(E.N, 0); cnt++;
+  }
+  assert.ok(n > 5000 && outG === 0, `差し込んだ表でも持ち場の横が領域の中（外 ${outG}/${n} 点）`);
+  assert.ok(sumD / cnt < -10 && sumE / cnt > 10, `左SBの立つ側が表で決まる（既定 ${(sumD / cnt).toFixed(1)}m → 反転 ${(sumE / cnt).toFixed(1)}m）`);
+  assert.notEqual(digestMatch(D), digestMatch(E), '表を変えると展開が変わる');
+  // 3) 決定的・保存→復元（差し込んだ表で）
+  const E2 = createMatch(inpM); run(E2, 2000);
+  const snap = snapshot(E2); run(E2, 4000);
+  const E3 = createMatch(inpM); run(E3, 4000);
+  assert.equal(digestMatch(E3), digestMatch(E2), '同じ入力は同じ試合');
+  const fresh = createMatch(inpM); restore(fresh, snap); run(fresh, 4000);
+  assert.equal(digestMatch(fresh), digestMatch(E2), '差し込んだ表の保存→復元');
+  // 4) 不正な表は createMatch が例外にする（試合の途中で壊れない）
+  const bad = (f) => { const z = JSON.parse(JSON.stringify(ZONES['4-4-2'])); f(z); const i = sampleInput(1, OPT); i.teams[0].zones = z; return () => createMatch(i); };
+  assert.throws(bad((z) => { z.att[0][0] = '9z'; }), /升の書き方/, 'レーンが範囲外');
+  assert.throws(bad((z) => { z.att[1][3] = '10a'; }), /升の書き方/, '行が範囲外');
+  assert.throws(bad((z) => { z.def[2][5] = ''; }), /升の書き方/, '空の領域');
+  assert.throws(bad((z) => { z.att[0].pop(); }), /10人分/, '人数が足りない');
+  assert.throws(bad((z) => { z.def.pop(); }), /3つ/, '局面が足りない');
+  assert.throws(bad((z) => { delete z.def; }), /3つ/, '守備の表がない');
+  // 5) zones: 0（従来の持ち場の式）は、差し込んだ表より優先
+  const inpZ = sampleInput(2, OPT); inpZ.zones = 0; inpZ.teams[0].zones = MZ;
+  const Zz = createMatch(inpZ);
+  assert.ok(Zz.zn[0] === null && Zz.zn[1] === null, 'zones:0 のときは差し込んだ表も使わない');
+  return `左右反転の表: 左SB ${(sumD / cnt).toFixed(1)}m → ${(sumE / cnt).toFixed(1)}m・領域内 ${n} 点`;
+});
+
+// ゾーン編集の部品（render/zoneedit.js。ビューアの「ゾーン配置（自分で設定）」）
+await test('zoneedit: 升の足し外し・表の検査と書式・編集の図', () => {
+  assert.equal(ZMAX, 3);
+  assert.equal(toggleCell('3a 4a', '4b'), '3a 4a 4b', '足す');
+  assert.equal(toggleCell('3a 4a 4b', '5a'), '4a 4b 5a', '4つ目を足すと古い升が外れる');
+  assert.equal(toggleCell('3a 4a', '3a'), '4a', '外す');
+  assert.equal(toggleCell('3a', '3a'), '3a', '最後の1升は外せない');
+  const rg = regionOf('3a 4a 4b');
+  assert.ok(Math.abs(rg.r - 11 / 3) < 1e-12 && Math.abs(rg.l - 1 / 3) < 1e-12 && rg.r0 === 3 && rg.r1 === 4 && rg.l0 === 0 && rg.l1 === 1, '領域の平均と外側の四角');
+  const norm = (x) => ({ att: x.att.map((r) => r.map((c) => c.split(' ').sort().join(' '))), def: x.def.map((r) => r.map((c) => c.split(' ').sort().join(' '))) });
+  let cells = 0;
+  for (const f of Object.keys(FORMATIONS)) {
+    const t = tabDefault(f);
+    assert.ok(tabOk(t) && tabOk(ZONES[f]), `${f}: 標準の表は正しい形`);
+    assert.notEqual(t, ZONES[f]); assert.deepEqual(t, ZONES[f]); // 複製（編集しても標準の表は変わらない）
+    const back = new Function(`return {${tabText(f, t)}}`)()[f]; // data/zones.js に貼れる書式 → 読み戻すと同じ表
+    assert.deepEqual(back, norm(t), `${f}: 表の文字列を読み戻せる`);
+    assert.deepEqual(Array.from(buildZones(f, back)), Array.from(buildZones(f)), `${f}: 読み戻した表はエンジンでも標準と同じ数値`);
+    for (const [side, q, sel] of [[0, 1, 0], [1, 2, 9], [0, 0, 5], [1, 1, 3]]) {
+      const svg = gridSvg(f, t, side, q, sel);
+      assert.equal((svg.match(/data-z="c:/g) || []).length, 50, '升は50個');
+      const on = t[side ? 'def' : 'att'][q][sel].split(' ').length; cells += on;
+      assert.equal((svg.match(/fill-opacity="0\.6"/g) || []).length, on, '選んだ選手の升が塗られる');
+      assert.equal((svg.match(/<circle/g) || []).length, 10, '丸は10人');
+      assert.ok(svg.startsWith('<svg') && svg.endsWith('</svg>'));
+    }
+    for (let s = 0; s < 10; s++) assert.ok(slotLabel(f, s).length >= 2 && /^#/.test(slotColor(f, s)));
+  }
+  assert.ok(!tabOk(null) && !tabOk({ att: [], def: [] }), '壊れた表は不可');
+  const bad = tabDefault('4-4-2');
+  bad.att[0][0] = '3a 4a 4b 5a'; assert.ok(!tabOk(bad), '4升は不可（上限3）');
+  bad.att[0][0] = '3f'; assert.ok(!tabOk(bad), 'レーン f は不可');
+  bad.att[0][0] = '10a'; assert.ok(!tabOk(bad), '行10は不可');
+  assert.equal(slotLabel('4-4-2', 0), 'SB左'); assert.equal(slotLabel('4-4-2', 3), 'SB右'); assert.equal(slotLabel('4-3-3', 5), '守MF');
+  // 編集した表がそのままエンジンに入る（升を足す → 領域の範囲が広がる）
+  const t = tabDefault('4-4-2'); t.att[1][0] = toggleCell(t.att[1][0], '8e');
+  const z0 = buildZones('4-4-2'), z1 = buildZones('4-4-2', t), o = ((0 * 3 + 1) * 10 + 0) * ZC;
+  assert.ok(z1[o + 3] > z0[o + 3] && z1[o + 5] > z0[o + 5], '升を足すと、領域の上限（奥行・横）が広がる');
+  return `4陣形の表と図 OK（塗った升 ${cells}）`;
 });
 
 await test('digest: チェック値は全ビット（小さな差も見える。-0 と 0・NaN は同じ扱い）', () => {

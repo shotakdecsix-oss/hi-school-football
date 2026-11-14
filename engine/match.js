@@ -31,6 +31,7 @@ import { buildZones } from './zones.js';
 // changes = [ { t, k, type: 'sub', slot, bench } ... ]: t(tick)以降の最初の中断（ボールが出た・ゴールのあと）かハーフタイムで、
 // チームkのスロット slot の選手を bench 番目の控えに替える。規定の人数・回数を超える交代、出場済みの控えは実行されない（記録の最後が 0）。
 //   { t, k, type: 'tac', tactics }: t(tick)からチームkのチーム指示を tactics に替える（試合中の指示変更）。setTactics が、いまの tick で m.input.changes に足す。
+// teams[k].zones = { att: [3局面][10人の升], def: [...] }: そのチームの領域の表を、陣形の表（data/zones.js）の代わりに使う（ゾーン編集用。省略 = 陣形の表）。入力 zones: 0 は従来の持ち場の式。
 // 入力は createMatch で複製する（呼び出し側があとで書き換えても、この試合には影響しない）。試合の記録 = 最初の入力 + m.input.changes（指示変更が足されていく）。
 // 種類 type の変更を、t の順（同じ t は入力の順）に並べる
 function sortedChanges(changes, type) {
@@ -81,7 +82,7 @@ export function createMatch(inp) {
   for (let i = 0; i < NP; i++) F[F_STA + i] = 1; // 全員が万全で始まる
   for (let k = 0; k < 2; k++) {
     const T = input.teams[k], form = FORMATIONS[T.formation];
-    m.zn[k] = input.zones === 0 ? null : buildZones(T.formation);
+    m.zn[k] = input.zones === 0 ? null : buildZones(T.formation, T.zones);
     let sx = 0, deepest = -1;
     for (let s = 0; s < 11; s++) {
       const i = k * 11 + s;

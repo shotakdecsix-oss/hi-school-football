@@ -22,7 +22,7 @@ import { STYLES } from '../data/styles.js';
 import { ROLE, FORMATIONS } from '../data/formations.js';
 import { ZONES } from '../data/zones.js';
 import { buildZones, phaseW, ZC } from '../engine/zones.js';
-import { ZMAX, tabOk, tabDefault, toggleCell, regionOf, tabText, gridSvg, slotLabel, slotColor } from '../render/zoneedit.js';
+import { ZMAX, tabOk, tabDefault, toggleCell, regionOf, tabText, gridSvg, slotLabel, slotColor, coverage, coverCount, coverLegend } from '../render/zoneedit.js';
 import { tacParams } from '../engine/tactic.js';
 import { RULES, normRules } from '../data/rules.js';
 import { computeGolden } from './golden-core.js';
@@ -1315,7 +1315,14 @@ await test('zoneedit: 升の足し外し・表の検査と書式・編集の図'
       const svg = gridSvg(f, t, side, q, sel);
       assert.equal((svg.match(/data-z="c:/g) || []).length, 50, '升は50個');
       const on = t[side ? 'def' : 'att'][q][sel].split(' ').length; cells += on;
-      assert.equal((svg.match(/fill-opacity="0\.6"/g) || []).length, on, '選んだ選手の升が塗られる');
+      assert.equal((svg.match(/data-sel="1"/g) || []).length, on, '選んだ選手の升に枠がつく');
+      const k = coverCount(coverage(t[side ? 'def' : 'att'][q]));
+      assert.equal(k.none + k.one + k.multi, 50);
+      assert.equal((svg.match(/fill="url\(#znHatch\)"/g) || []).length, k.none, '誰もいない升は斜線');
+      assert.equal((svg.match(/font-size="10" fill="#ffe9b0"/g) || []).length, k.multi, '重なる升には人数の数字');
+      const plain = gridSvg(f, t, side, q, sel, { cover: false });
+      assert.ok(!plain.includes('znHatch') && !plain.includes('#ffe9b0') && (plain.match(/data-z="c:/g) || []).length === 50, 'カバー表示を切ると一色（升は50個のまま）');
+      assert.ok(coverLegend(t[side ? 'def' : 'att'][q]).includes(`${k.none}升`) && coverLegend(t[side ? 'def' : 'att'][q]).includes(`重なり ${k.multi}升`), '凡例に升の数');
       assert.equal((svg.match(/<circle/g) || []).length, 10, '丸は10人');
       assert.ok(svg.startsWith('<svg') && svg.endsWith('</svg>'));
     }
@@ -1327,6 +1334,12 @@ await test('zoneedit: 升の足し外し・表の検査と書式・編集の図'
   bad.att[0][0] = '3f'; assert.ok(!tabOk(bad), 'レーン f は不可');
   bad.att[0][0] = '10a'; assert.ok(!tabOk(bad), '行10は不可');
   assert.equal(slotLabel('4-4-2', 0), 'SB左'); assert.equal(slotLabel('4-4-2', 3), 'SB右'); assert.equal(slotLabel('4-3-3', 5), '守MF');
+  // カバー人数: 領域 = 選んだ升の外側の四角。同じ升に9人 + 縦に伸びた1人 → 中央の升は10人
+  const cvC = coverage(['5c', '5c', '5c', '5c', '5c', '5c', '5c', '5c', '5c', '4c 6c']);
+  assert.equal(cvC[5 * 5 + 2], 10); assert.equal(cvC[4 * 5 + 2], 1); assert.equal(cvC[6 * 5 + 2], 1); assert.equal(cvC.reduce((a, b) => a + b, 0), 12);
+  assert.deepEqual(coverCount(cvC), { none: 47, one: 2, multi: 1 });
+  const cvD = coverage(['3a 4b', ...Array(9).fill('0e')]); // 斜めの2升 = 外側の四角の4升（3a・3b・4a・4b）
+  assert.ok([3 * 5, 3 * 5 + 1, 4 * 5, 4 * 5 + 1].every((i) => cvD[i] === 1) && cvD[3 * 5 + 2] === 0 && cvD[0 * 5 + 4] === 9, '斜めの2升は外側の四角で数える');
   // 編集した表がそのままエンジンに入る（升を足す → 領域の範囲が広がる）
   const t = tabDefault('4-4-2'); t.att[1][0] = toggleCell(t.att[1][0], '8e');
   const z0 = buildZones('4-4-2'), z1 = buildZones('4-4-2', t), o = ((0 * 3 + 1) * 10 + 0) * ZC;

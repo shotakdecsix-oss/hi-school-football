@@ -79,7 +79,7 @@ try {
   throw e;
 }
 const [{ createMatch, stepMatch, frame, setTactics, staminaOf }, { sampleInput }, { DT, TICK_HZ, dirOf }, { FORMATIONS }, { VIEWBOX, pitchSvg, actorsSvg, lerpFrame, ROLE_LEGEND }, { RULES }, { TACTICS }, { STYLES }, ZE] = mods;
-const { ZMAX, QLAB, QHINT, tabOk, tabDefault, toggleCell, tabText, gridSvg, slotLabel, slotColor } = ZE;
+const { ZMAX, QLAB, QHINT, tabOk, tabDefault, toggleCell, tabText, gridSvg, slotLabel, slotColor, coverLegend } = ZE;
 
 const $ = (id) => document.getElementById(id);
 for (const id of ['hf', 'af']) for (const f of Object.keys(FORMATIONS)) $(id).add(new Option(f, f));
@@ -125,7 +125,7 @@ $('legend').textContent = ROLE_LEGEND;
 let m, prev, cur, vp = -1, acc = 0, speed = 4, paused = false, last = performance.now(), holdUntil = 0, banner = '', ended = false;
 
 // ── ゾーン編集（自分で設定）: 升をタップして選手ごとの領域を決め、その表で試合を動かす。表はこの端末（localStorage）に保存。チームごと・陣形ごとに別 ──
-let zK = 0, zSide = 0, zQ = 1, zS = 0; // 編集中のチーム・攻(0)/守(1)・局面・選手（0..9 = 外野手のスロット1..10）
+let zK = 0, zSide = 0, zQ = 1, zS = 0, zCov = true; // 編集中のチーム・攻(0)/守(1)・局面・選手（0..9 = 外野手のスロット1..10）・升をカバー人数で塗るか
 const zUse = [false, false], zTabs = [{}, {}]; // zUse[k] = そのチームは自分の表で動かす
 const zFm = (k) => $(k ? 'af' : 'hf').value, zKey = (k) => `zn1:${k}:${zFm(k)}`;
 function zTab(k) { // チーム k のいまの陣形の表（自分の表。まだ無ければ標準の複製）
@@ -139,14 +139,16 @@ function zTab(k) { // チーム k のいまの陣形の表（自分の表。ま�
 }
 const zSave = (k) => { try { localStorage.setItem(zKey(k), JSON.stringify(zTab(k))); } catch {} };
 function znRender() {
-  const f = zFm(zK), t = zTab(zK), bt = (kind, v, label, on) => `<button data-z="${kind}:${v}" class="${on ? 'on' : ''}">${label}</button>`;
+  const f = zFm(zK), t = zTab(zK), rows = t[zSide ? 'def' : 'att'][zQ], bt = (kind, v, label, on) => `<button data-z="${kind}:${v}" class="${on ? 'on' : ''}">${label}</button>`;
   const chips = Array.from({ length: 10 }, (_, s) => `<button data-z="s:${s}" class="${s === zS ? 'on' : ''}" style="border-left:4px solid ${slotColor(f, s)}">${s + 2} ${slotLabel(f, s)}</button>`).join(''); // 番号はピッチの背番号（GK=1・外野手は 2〜11）
-  $('znBody').innerHTML = gridSvg(f, t, zSide, zQ, zS) + `<div id="znCtl">
+  $('znBody').innerHTML = gridSvg(f, t, zSide, zQ, zS, { cover: zCov }) + `<div id="znCtl">
     <div class="zr">${[0, 1].map((k) => bt('k', k, `${k ? '青' : '赤'} ${zFm(k)}${zUse[k] ? '・自分の表' : ''}`, k === zK)).join('')}</div>
     <label class="zr"><input type="checkbox" data-z="use:0" ${zUse[zK] ? 'checked' : ''}> この表で動かす（${zK ? '青' : '赤'}）。オフ = 標準の表</label>
     <div class="zr">${bt('side', 0, '攻撃', !zSide)}${bt('side', 1, '守備', zSide)}</div>
     <div class="zr">${QLAB[zSide].map((l, q) => bt('q', q, l, q === zQ)).join('')}</div>
     <div class="zh">${QHINT[zSide]}</div>
+    <label class="zr"><input type="checkbox" data-z="cov:0" ${zCov ? 'checked' : ''}> カバー状況を色で見る（領域=点線の四角で数える。GKは数えない）</label>
+    ${zCov ? `<div class="zh">${coverLegend(rows)}</div>` : ''}
     <div class="zr">${chips}</div>
     <div class="zh">升をタップ → 選んだ選手の領域に足す／外す（1〜${ZMAX}升。多く足すと古い升が外れる）。点線の四角が領域（この外側へは出ない）、丸が立つ目安。ピッチの選手をクリックしても選べる。</div>
     <div class="zr">${bt('rq', 0, 'この局面を標準に')}${bt('rall', 0, 'この陣形を全部標準に')}</div>
@@ -160,6 +162,7 @@ $('znBody').onclick = async (e) => {
   const [kind, v] = el.dataset.z.split(':'), f = zFm(zK), side = zSide ? 'def' : 'att';
   if (kind === 'k') zK = +v;
   else if (kind === 'use') zUse[zK] = el.checked;
+  else if (kind === 'cov') zCov = el.checked;
   else if (kind === 'side') zSide = +v;
   else if (kind === 'q') zQ = +v;
   else if (kind === 's') zS = +v;

@@ -36,6 +36,27 @@ export function regionOf(str) {
   return { r: sr / a.length, l: sl / a.length, r0, r1, l0, l1 };
 }
 
+// 升ごとのカバー人数 c[行×5+レーン]: 1局面の10人の領域（選んだ升の外側の四角。エンジンが持ち場の限界にするのと同じ）に、その升が入る人数。GK は表にないので数えない
+export function coverage(rows) {
+  const c = new Array(50).fill(0);
+  for (const str of rows) { const g = regionOf(str); for (let r = g.r0; r <= g.r1; r++) for (let l = g.l0; l <= g.l1; l++) c[r * 5 + l]++; }
+  return c;
+}
+// 誰もいない（0人）・1人・重なり（2人以上）の升の数
+export function coverCount(c) {
+  let none = 0, one = 0, multi = 0;
+  for (const v of c) { if (v === 0) none++; else if (v === 1) one++; else multi++; }
+  return { none, one, multi };
+}
+// 升の色: 0人=斜線（暗い赤。目立たせすぎない）・1人=緑・2人=黄土・3人=橙・4人以上=赤橙。2人以上は升の隅に人数の数字も出す
+export const COVCOL = ['url(#znHatch)', '#1c5b36', '#8a6d14', '#b5651a', '#cc4a1f'];
+const HATCH = 'repeating-linear-gradient(45deg,#1b1517 0 3px,#6e3636 3px 5px)';
+// 凡例（HTML の文字列）: 色の見本と、その局面の升の数
+export function coverLegend(rows) {
+  const k = coverCount(coverage(rows)), sw = (bg) => `<i style="display:inline-block;width:12px;height:12px;vertical-align:-2px;margin:0 3px 0 0;border:1px solid #484f58;background:${bg}"></i>`;
+  return `${sw(HATCH)}誰もいない ${k.none}升　${sw(COVCOL[1])}1人 ${k.one}升　${sw(`linear-gradient(90deg,${COVCOL[2]},${COVCOL[3]},${COVCOL[4]})`)}重なり ${k.multi}升（数字=人数）`;
+}
+
 // 選手 s（0..9 = 外野手のスロット 1..10）の呼び名（'SB左'）と色
 export function slotLabel(f, s) {
   const d = FORMATIONS[f][s + 1];
@@ -49,19 +70,25 @@ export function tabText(f, t) {
   return `  '${f}': {\n    att: [\n${rows(t.att)}\n    ],\n    def: [\n${rows(t.def)}\n    ],\n  },`;
 }
 
-// 編集用の升の図（SVG の文字列）。攻める向きが上・左が選手から見て左。選んだ選手 sel の升を塗り、外側の四角を点線で、全員の立つ目安を番号の丸で描く。
-// 升は data-z="c:3b"（クリックで toggleCell）。丸・線は pointer-events なし（下の升を押せる）
-export function gridSvg(f, t, side, q, sel) {
+// 編集用の升の図（SVG の文字列）。攻める向きが上・左が選手から見て左。選んだ選手 sel の升を枠と色で示し、外側の四角を点線で、全員の立つ目安を番号の丸で描く。
+// opt.cover（既定 true）: 升をカバー人数で塗る（誰もいない=斜線・1人=緑・重なり=黄土〜赤橙と人数の数字）。false なら一色
+// 升は data-z="c:3b"（クリックで toggleCell）。選んだ升の枠は data-sel="1"。丸・線・数字は pointer-events なし（下の升を押せる）
+export function gridSvg(f, t, side, q, sel, opt = {}) {
   const { CW, CH, GX, GY } = GRID, rows = t[side ? 'def' : 'att'][q], W = GX + 5 * CW + 6, H = GY + 10 * CH + 28, mine = rows[sel].split(' ');
-  let g = `<svg id="znSv" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+  const cover = opt.cover !== false, cv = coverage(rows), col = slotColor(f, sel);
+  let g = `<svg id="znSv" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`, nums = '';
+  if (cover) g += '<defs><pattern id="znHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="8" height="8" fill="#1b1517"/><path d="M0 0V8" stroke="#6e3636" stroke-width="1.6"/></pattern></defs>';
   for (let r = 9; r >= 0; r--) {
     const y = GY + (9 - r) * CH;
     g += `<text x="${GX - 6}" y="${y + CH / 2 + 4}" text-anchor="end" font-size="11" fill="#8b949e">${r}</text>`;
     for (let l = 0; l < 5; l++) {
-      const c = r + LAN[l], on = mine.includes(c);
-      g += `<rect data-z="c:${c}" x="${GX + l * CW}" y="${y}" width="${CW}" height="${CH}" fill="${on ? slotColor(f, sel) : '#12301f'}" fill-opacity="${on ? 0.6 : 1}" stroke="#25503a"/>`;
+      const v = cv[r * 5 + l], x = GX + l * CW;
+      g += `<rect data-z="c:${r}${LAN[l]}" x="${x}" y="${y}" width="${CW}" height="${CH}" fill="${cover ? COVCOL[Math.min(v, 4)] : '#12301f'}" stroke="#25503a"/>`;
+      if (cover && v >= 2) nums += `<text x="${x + CW - 5}" y="${y + 12}" text-anchor="end" font-size="10" fill="#ffe9b0" pointer-events="none">${v}</text>`;
     }
   }
+  for (const c of mine) g += `<rect data-sel="1" x="${GX + LAN.indexOf(c[1]) * CW + 1}" y="${GY + (9 - +c[0]) * CH + 1}" width="${CW - 2}" height="${CH - 2}" fill="${col}" fill-opacity="${cover ? 0.3 : 0.6}" stroke="${col}" stroke-width="2" pointer-events="none"/>`;
+  g += nums;
   for (let l = 0; l < 5; l++) g += `<text x="${GX + (l + 0.5) * CW}" y="${GY + 10 * CH + 14}" text-anchor="middle" font-size="11" fill="#8b949e">${LAN[l]}${l === 0 ? ' 左' : l === 4 ? ' 右' : ''}</text>`;
   g += `<text x="${GX + 2.5 * CW}" y="11" text-anchor="middle" font-size="10" fill="#8b949e">↑ 攻める向き（相手ゴール）</text>`;
   g += `<text x="${GX + 2.5 * CW}" y="${H - 3}" text-anchor="middle" font-size="10" fill="#8b949e">自陣ゴール</text>`;

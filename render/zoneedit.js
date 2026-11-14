@@ -73,7 +73,7 @@ export function gridSvg(f, t, side, q, sel) {
   g += `<rect x="${GX + rg.l0 * CW}" y="${GY + (9 - rg.r1) * CH}" width="${(rg.l1 - rg.l0 + 1) * CW}" height="${(rg.r1 - rg.r0 + 1) * CH}" fill="none" stroke="#fff" stroke-width="1.6" stroke-dasharray="5 3" pointer-events="none"/>`;
   const dot = (s) => {
     const p = regionOf(rows[s]), on = s === sel, cx = GX + (p.l + 0.5) * CW, cy = GY + (9.5 - p.r) * CH;
-    return `<g pointer-events="none"><circle cx="${n(cx)}" cy="${n(cy)}" r="${on ? 11 : 8}" fill="${slotColor(f, s)}" stroke="${on ? '#fff' : '#0d1117'}" stroke-width="${on ? 2 : 1}"/><text x="${n(cx)}" y="${n(cy + 4)}" text-anchor="middle" font-size="${on ? 12 : 10}" font-weight="700" fill="#fff">${s + 1}</text></g>`;
+    return `<g pointer-events="none"><circle cx="${n(cx)}" cy="${n(cy)}" r="${on ? 11 : 8}" fill="${slotColor(f, s)}" stroke="${on ? '#fff' : '#0d1117'}" stroke-width="${on ? 2 : 1}"/><text x="${n(cx)}" y="${n(cy + 4)}" text-anchor="middle" font-size="${on ? 12 : 10}" font-weight="700" fill="#fff">${s + 2}</text></g>`; // 丸の番号は、ピッチに出る背番号（GK が1番・外野手は 2〜11）
   };
   for (let s = 0; s < 10; s++) if (s !== sel) g += dot(s);
   return g + dot(sel) + '</svg>';

@@ -140,7 +140,7 @@ function zTab(k) { // チーム k のいまの陣形の表（自分の表。ま�
 const zSave = (k) => { try { localStorage.setItem(zKey(k), JSON.stringify(zTab(k))); } catch {} };
 function znRender() {
   const f = zFm(zK), t = zTab(zK), bt = (kind, v, label, on) => `<button data-z="${kind}:${v}" class="${on ? 'on' : ''}">${label}</button>`;
-  const chips = Array.from({ length: 10 }, (_, s) => `<button data-z="s:${s}" class="${s === zS ? 'on' : ''}" style="border-left:4px solid ${slotColor(f, s)}">${s + 1} ${slotLabel(f, s)}</button>`).join('');
+  const chips = Array.from({ length: 10 }, (_, s) => `<button data-z="s:${s}" class="${s === zS ? 'on' : ''}" style="border-left:4px solid ${slotColor(f, s)}">${s + 2} ${slotLabel(f, s)}</button>`).join(''); // 番号はピッチの背番号（GK=1・外野手は 2〜11）
   $('znBody').innerHTML = gridSvg(f, t, zSide, zQ, zS) + `<div id="znCtl">
     <div class="zr">${[0, 1].map((k) => bt('k', k, `${k ? '青' : '赤'} ${zFm(k)}${zUse[k] ? '・自分の表' : ''}`, k === zK)).join('')}</div>
     <label class="zr"><input type="checkbox" data-z="use:0" ${zUse[zK] ? 'checked' : ''}> この表で動かす（${zK ? '青' : '赤'}）。オフ = 標準の表</label>
@@ -176,7 +176,7 @@ $('znBody').onclick = async (e) => {
     $('znMsg').textContent = ok ? 'コピーしました' : '下の表を長押しで選んでコピーしてください';
   }
 };
-$('hf').onchange = $('af').onchange = znRender;
+$('hf').onchange = $('af').onchange = () => { zUse[0] = zUse[1] = false; znRender(); }; // 陣形を変えたら、標準の表に戻す（自分の表は、その陣形のチェックを入れ直すか、升に触ると使う）
 function znOverlay() { // 編集中の選手の、いまの領域（ボール位置で3局面を混ぜたもの。余白込み）と持ち場の十字を、ピッチに重ねる
   const i = zK * 11 + zS + 1, a = m.zr, d = dirOf(m.N, zK);
   if (!$('zn').open || !(a[i * 4 + 1] > a[i * 4])) { if (zov.innerHTML) zov.innerHTML = ''; return; }

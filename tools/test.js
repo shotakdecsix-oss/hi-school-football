@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import * as M from '../engine/core/math.js';
 import { hash4, f4, normal4, Stream } from '../engine/core/rng.js';
 import { createMatch, stepMatch, run, snapshot, restore, snapshotToJSON, digestMatch, winner, staminaOf, frame, setTactics } from '../engine/match.js';
-import { predictBall } from '../engine/brain.js';
+import { predictBall, touches } from '../engine/brain.js';
 import { markTouch, goalCredit } from '../engine/touchlog.js';
 import { selfCheck } from '../engine/selfcheck.js';
 import { Digest } from '../engine/core/digest.js';
@@ -14,8 +14,8 @@ import { startPK, pkDecided } from '../engine/pk.js';
 import { AB, NAB, abVec, effVec } from '../engine/abil.js';
 import { sampleInput } from '../engine/sample.js';
 import { stepBall } from '../engine/ball.js';
-import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, N_LEN, NEVER_SEEN, BALL_R, PRED_N, PRED_TICKS, DT, PA_D, PA_HW, SP, ST, ACT, dirOf } from '../engine/consts.js';
-import { decide, lureOf, offsideLine, lobSafe } from '../engine/decide.js';
+import { FULL_TICKS, HALF_TICKS, HL, HW, NP, I, PHASE, EV, F_B, F_R, F_STA, F_PASS, F_LEN, F_LEN_P, F_FACE, F_SCN, N_LS, N_LEN, NEVER_SEEN, BALL_R, PRED_N, PRED_TICKS, DT, PA_D, PA_HW, SP, ST, ST_N, ACT, dirOf } from '../engine/consts.js';
+import { decide, lureOf, offsideLine, lobSafe, aerialP } from '../engine/decide.js';
 import { seeAt, seeAll, senseAt, memOf, blindOf, fovOf, lagOf, look, refreshFace } from '../engine/percept.js';
 import { TACTICS, normTactics } from '../data/tactics.js';
 import { STYLES } from '../data/styles.js';
@@ -242,9 +242,10 @@ await test('rules: ノックアウト戦は、同点なら延長（前後半）�
 
 // ── 再開（スローイン・ゴールキック・コーナー）──
 await test('restart: 再開は正しいチームの選手がボールを持って始め、相手は規定の距離（スロー2m・コーナー9.15m・GKはエリア外）の外', () => {
-  const cnt = [0, 0, 0, 0];
-  for (let seed = 1; seed <= 4; seed++) {
-    const m = mk(seed);
+  const cnt = [0, 0, 0, 0]; let nm = 0;
+  // コーナーは1試合に 1 本前後と少ない（現実は約10。クロスを入れる③で増える）ので、2本見るまで試合を足す（種は決まった順）
+  for (let seed = 1; seed <= 24 && (seed <= 4 || cnt[SP.CORNER] < 2); seed++) {
+    const m = mk(seed); nm++;
     let n0 = 0;
     while (m.N[I.PHASE] !== PHASE.END) {
       stepMatch(m);
@@ -268,7 +269,7 @@ await test('restart: 再開は正しいチームの選手がボールを持っ�
     }
   }
   assert.ok(cnt[SP.THROW] > 0 && cnt[SP.GKICK] > 0 && cnt[SP.CORNER] > 0, `スロー${cnt[1]} GK${cnt[2]} CK${cnt[3]}`);
-  return `4試合: スローイン${cnt[1]} ゴールキック${cnt[2]} コーナー${cnt[3]}`;
+  return `${nm}試合: スローイン${cnt[1]} ゴールキック${cnt[2]} コーナー${cnt[3]}`;
 });
 
 // ── PK戦 ──
@@ -674,6 +675,66 @@ await test('decide: 浮き球・クリアの蹴り出しの危険（lobSafe）�
   m = mk(); m.px[5] = 2; m.py[5] = 0.3; // 味方側の番号（o0 より前）は数えない
   assert.equal(f1(m), 1, '味方は数えない');
   return `止められずに済む確率: 通り道の相手 ${fc.toFixed(2)}・すぐ後ろの相手 ${fb.toFixed(2)}`;
+});
+// ── 空中の競り合い（v19）──
+// 合成の場面: 全員をピッチの外へ置き、ボールを空中の1点（通り道の長さ 0）に止めて touches を何千回も呼ぶ。tick を変えるたびに乱数が変わる。
+const aerialLab = () => {
+  const m = mk(1);
+  const clear = () => { for (let p = 0; p < NP; p++) { m.px[p] = 80 + p; m.py[p] = 40; m.vx[p] = 0; m.vy[p] = 0; } };
+  const put = (p, x, y, ab = {}) => { m.px[p] = x; m.py[p] = y; for (const [k, v] of Object.entries({ HED: 10, JMP: 10, STR: 10, ...ab })) m.ab[p * NAB + AB[k]] = v; };
+  const trial = (bz, n) => { // 最初に触った選手（記録の最後の接触）ごとの回数と、競り合いになった回数
+    const cnt = new Map(), d0 = m.N[I.ST + ST.AIRD], w0 = [m.N[I.ST + ST.AIRW], m.N[I.ST + ST_N + ST.AIRW]];
+    for (let i = 0; i < n; i++) {
+      m.t = 5000 + i;
+      m.F[F_B] = 0; m.F[F_B + 1] = 0; m.F[F_B + 2] = bz; for (let j = 3; j < 8; j++) m.F[F_B + j] = 0;
+      m.N[I.OWN] = -1; m.N[I.LAST] = -1; m.N[I.PASSK] = -1; m.N[I.RECV] = -1; m.N[I.LOCK] = 0; m.cd.fill(0);
+      touches(m);
+      cnt.set(m.N[I.LAST], (cnt.get(m.N[I.LAST]) || 0) + 1);
+    }
+    return { fr: (p) => (cnt.get(p) || 0) / n, duels: m.N[I.ST + ST.AIRD] - d0, wins: [m.N[I.ST + ST.AIRW] - w0[0], m.N[I.ST + ST_N + ST.AIRW] - w0[1]] };
+  };
+  return { m, clear, put, trial };
+};
+await test('aerial: 空中の競り合い — 先に触る確率が、AIの見込み（aerialP）と合う。近い・JMP/HEDが高い・GKほど勝つ', () => {
+  const { m, clear, put, trial } = aerialLab(), N = 4000, out = [];
+  const chk = (name, rcv, bz = 1.5) => {
+    const r = trial(bz, N), est = aerialP(m, rcv, 0, 0, 0, 0, null), fr = r.fr(rcv);
+    assert.equal(r.duels, N, `${name}: 毎回、両チームが加わった競り合いになる`);
+    assert.ok(Math.abs(fr - est) < 0.03, `${name}: 実際 ${fr.toFixed(3)} と見込み ${est.toFixed(3)} が 0.03 以上ずれた`);
+    out.push(`${name} ${fr.toFixed(2)}/${est.toFixed(2)}`);
+    return { fr, r };
+  };
+  clear(); put(3, 0.5, 0); put(14, -1.0, 0); put(15, 0, 1.4); // 受け手が一番近い（0.5・1.0・1.4m）、能力は同じ
+  const a = chk('近さ', 3);
+  assert.ok(a.r.fr(14) > a.r.fr(15), '近い相手のほうが、遠い相手より先に触る');
+  clear(); put(3, 0.7, 0, { JMP: 8 }); put(14, -0.7, 0, { JMP: 12 }); put(15, 0, 0.7, { JMP: 12 }); // 受け手だけ JMP が低い（4点差・相手2人）
+  assert.ok(chk('JMP低', 3).fr < 0.1, '跳べない選手は、跳べる相手2人に、ほぼ勝てない');
+  clear(); put(3, 0.7, 0, { HED: 12, JMP: 11 }); put(14, -0.7, 0);
+  assert.ok(chk('HED/JMP高', 3).fr > 0.7, 'HED・JMP が高い選手は、同じ近さの相手に多く勝つ');
+  clear(); put(3, 0.7, 0); put(14, -0.7, 0);
+  const e = chk('同じ', 3);
+  assert.ok(Math.abs(e.fr - 0.5) < 0.04, `能力も近さも同じなら五分 ${e.fr.toFixed(2)}`);
+  assert.equal(e.r.wins[0] + e.r.wins[1], N, '勝った側の数（AIRW）は競り合いの数と同じ');
+  clear(); put(3, 0.5, 0); put(11, -1.0, 0); m.ab[11 * NAB + AB.GKH] = 13; // 相手のGKが 1.0m（手が使える）
+  const g = chk('GK', 3);
+  assert.ok(g.fr < 0.3, `GKは手が使えるぶん、近い FW にも多く勝つ（FW の勝ち ${g.fr.toFixed(2)}）`);
+  return '先に触る確率 実際/見込み: ' + out.join('・');
+});
+await test('aerial: 競り合いにならない場合は、いままでどおり一番近い選手が触る（片方のチームだけ・ボールが低い）。競り合いの数も増えない', () => {
+  const { m, clear, put, trial } = aerialLab();
+  clear(); put(3, 0.5, 0); put(4, -0.7, 0); // 空中でも片方のチームだけ
+  let r = trial(1.5, 500);
+  assert.equal(r.fr(3), 1, '空中でも、近くにいるのが片方のチームだけなら、一番近い選手が触る'); assert.equal(r.duels, 0);
+  clear(); put(3, 0.5, 0); put(14, -0.6, 0); // 低いボール（足元）は、両チームが近くても競り合いにならない
+  r = trial(0.5, 500);
+  assert.equal(r.fr(3), 1, '足元のボールは一番近い選手が触る'); assert.equal(r.duels, 0);
+  clear(); put(3, 1.2, 0); put(14, -1.0, 0); // 誰も足の届く範囲（0.8m）に入っていない: 誰も触らない
+  r = trial(1.5, 200);
+  assert.equal(r.fr(-1), 1, '誰も 0.8m に入っていなければ触らない'); assert.equal(r.duels, 0);
+  clear(); put(3, 0.5, 0); put(14, -2.2, 0); // 競りに加われる範囲（1.8m）の外の相手は加わらない
+  r = trial(1.5, 500);
+  assert.equal(r.fr(3), 1); assert.equal(r.duels, 0);
+  return '競り合いが無い場面: 最寄りが 100% 触る・競り合い 0';
 });
 await test('styles: チームの戦い方の型（標準・保持・直接）は、指示の項目と範囲に合っている', () => {
   const keys = new Set(TACTICS.map((d) => d.key));

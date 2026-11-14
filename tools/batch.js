@@ -42,7 +42,7 @@ const mkInput = (seed) => {
   return inp;
 };
 
-const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib', 'thr', 'gk', 'ck'];
+const KEYS = ['goals', 'shots', 'sot', 'save', 'pass', 'ok', 'lob', 'clr', 'tkl', 'tklw', 'icpt', 'miss', 'drib', 'thr', 'gk', 'ck', 'aird', 'airw'];
 const tot = [0, 1].map(() => Object.fromEntries(KEYS.map((k) => [k, 0])));
 const mv = [0, 1].map(() => ({ n: 0, far8: 0, far12: 0, disp: 0, near15: 0, near3: 0, len: 0, wid: 0, ticks: 0, poss: 0 }));
 const DZ = [0, 1].map(() => Array.from({ length: 3 }, () => ({ n: 0, line: 0, len: 0, wid: 0, press: 0, cover: 0, mark: 0, near: 0 }))); // 守備中の陣形（ボール位置の3区分ごと）
@@ -214,7 +214,7 @@ for (let s = 0; s < n; s++) {
     t.sot += m.N[B + ST.SOT]; t.save += m.N[B + ST.SAVE]; t.pass += m.N[B + ST.PASS]; t.ok += m.N[B + ST.PASSOK];
     t.lob += m.N[B + ST.LOB]; t.clr += m.N[B + ST.CLR]; t.tkl += m.N[B + ST.TKL]; t.tklw += m.N[B + ST.TKLW];
     t.icpt += m.N[B + ST.ICPT]; t.miss += m.N[B + ST.MISC]; t.drib += m.N[B + ST.DRIB];
-    t.thr += m.N[B + ST.THROW]; t.gk += m.N[B + ST.GKICK]; t.ck += m.N[B + ST.CORNER];
+    t.thr += m.N[B + ST.THROW]; t.gk += m.N[B + ST.GKICK]; t.ck += m.N[B + ST.CORNER]; t.aird += m.N[B + ST.AIRD]; t.airw += m.N[B + ST.AIRW];
   }
   if (check) {
     const m2 = createMatch(input);
@@ -226,10 +226,10 @@ for (let s = 0; s < n; s++) {
 const sec = (performance.now() - t0) / 1000, runs = n * (check ? 2 : 1);
 const f1 = (x) => x.toFixed(1), pc = (x) => Math.round(100 * x) + '%';
 console.log(`${o.home}(力${o.abilHome}) vs ${o.away}(力${o.abilAway})${flat ? ' 能力一律' : ''}  ${n}試合（種 ${seed0}〜${seed0 + n - 1}）  規定 ${rkey}${ko ? '(ノックアウト)' : ''}  勝${w} 分${d} 負${l}`);
-console.log('1試合あたり    得点  シュ 枠内 セーブ  パス 成功率 浮球 クリア  タックル(勝)  奪取 ﾀｯﾁ失敗 ドリブル 保持率 スロー  GK   CK');
+console.log('1試合あたり    得点  シュ 枠内 セーブ  パス 成功率 浮球 クリア  タックル(勝)  奪取 ﾀｯﾁ失敗 ドリブル 保持率 スロー  GK   CK  空中競(勝)');
 for (let k = 0; k < 2; k++) {
   const t = tot[k], p = (x) => f1(x / n).padStart(6);
-  console.log(`  チーム${k}    ${p(t.goals)}${p(t.shots)}${p(t.sot)}${p(t.save)}${p(t.pass)}  ${pc(t.ok / Math.max(1, t.pass)).padStart(5)}${p(t.lob)}${p(t.clr)}   ${f1(t.tkl / n).padStart(5)}(${f1(t.tklw / n).padStart(4)})${p(t.icpt)}${p(t.miss)}${p(t.drib)}  ${pc(mv[k].poss / Math.max(1, mv[0].poss + mv[1].poss)).padStart(5)}${p(t.thr)}${p(t.gk)}${p(t.ck)}`);
+  console.log(`  チーム${k}    ${p(t.goals)}${p(t.shots)}${p(t.sot)}${p(t.save)}${p(t.pass)}  ${pc(t.ok / Math.max(1, t.pass)).padStart(5)}${p(t.lob)}${p(t.clr)}   ${f1(t.tkl / n).padStart(5)}(${f1(t.tklw / n).padStart(4)})${p(t.icpt)}${p(t.miss)}${p(t.drib)}  ${pc(mv[k].poss / Math.max(1, mv[0].poss + mv[1].poss)).padStart(5)}${p(t.thr)}${p(t.gk)}${p(t.ck)}${p(t.aird)}(${pc(t.airw / Math.max(1, t.aird)).padStart(4)})`);
 }
 console.log('攻撃中の動き（保持側の外野手）  陣形から8m超/12m超の人数   平均ずれ   保持者から15m以内の味方   最寄り3人の平均距離   縦幅/横幅');
 for (let k = 0; k < 2; k++) {

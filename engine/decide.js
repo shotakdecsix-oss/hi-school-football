@@ -2,11 +2,11 @@
 // 選択肢（シュート・パス・スペースへのパス・ドリブル・クリア）に点数をつけ、一番高いものを選ぶ。
 // 点数 = ボールを持つ価値(xt)の期待値。乱数は「見え方（点数の誤差）」と「蹴りの誤差」にだけ使う。
 import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, F_STA, I, ACT, EV, ST, ST_N, SP, PHASE, dirOf } from './consts.js';
-import { AB, NAB } from './abil.js';
+import { AB, NAB, GK_ANCHOR } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
-import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_CS } from './geom.js';
+import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_LQ, K_CS, R_AIR, SG_AIR, airScore, airScoreGK } from './geom.js';
 import { seeAll } from './percept.js';
 import { markTouch } from './touchlog.js';
 
@@ -50,6 +50,41 @@ export function lobSafe(m, o0, x, y, tx, ty, aw) {
   }
   return f;
 }
+// 浮き球の着地点 (lx,ly) で、受け手 a が空中の競り合いに勝って先に触れる見込み（brain.js の aerialDuel と同じ式）。T=飛んでいる時間。
+// 受け手も相手も、T 秒のあいだ着地点へ走ったあとの「ボールへの近さ」で点数がつく（近さの R_AIR m 以内の選手だけが加わる）。見えていない相手は数えない。
+// 勝つ確率は、受け手の乱数 z について 5点の積分（標準正規分布）: P = E_z[ Π_j Φ((sa - sj)/σ + z) ]（Φ はロジスティックで近似）。
+const GHZ = [0, 1.3556, -1.3556, 2.857, -2.857], GHW = [0.5333, 0.2221, 0.2221, 0.01126, 0.01126];
+const lgs = (x) => 1 / (1 + exp(-1.702 * x));
+const covered = (tt, vm, ac) => (tt <= 0 ? 0 : tt < vm / ac ? 0.5 * ac * tt * tt : (vm * vm) / (2 * ac) + vm * (tt - vm / ac)); // tt 秒で走れる距離
+const SQ = new Float64Array(11);
+export function aerialP(m, a, lx, ly, T, k, aw) {
+  const { px, py, vmax, acc, ab, slot, rgk } = m, o0 = (1 - k) * 11, A = a * NAB;
+  const ra = Math.sqrt((px[a] - lx) * (px[a] - lx) + (py[a] - ly) * (py[a] - ly)), dA = Math.max(0, ra - covered(T - 0.1, vmax[a], acc[a]));
+  if (dA >= R_AIR) return 0.05; // 着地点に間に合わない
+  const sa = airScore(ab[A + AB.HED], ab[A + AB.JMP], ab[A + AB.STR], dA);
+  let n = 0;
+  for (let q = o0; q < o0 + 11; q++) {
+    if (aw && aw[q] < 0.5) continue;
+    const B = q * NAB, gk = slot[q] === 0, dq = Math.sqrt((px[q] - lx) * (px[q] - lx) + (py[q] - ly) * (py[q] - ly)), rem = dq - covered(T - REACT_BASE, vmax[q], acc[q]);
+    if (rem >= (gk ? rgk[q] : R_AIR * m.rdK[q])) continue; // 間に合わない
+    const d = rem > 0 ? rem : 0;
+    SQ[n++] = gk ? airScoreGK(ab[B + AB.JMP], ab[B + AB.GKH], d, rgk[q]) : airScore(ab[B + AB.HED], ab[B + AB.JMP], ab[B + AB.STR], d);
+  }
+  if (n === 0) return 1;
+  let p = 0;
+  for (let g = 0; g < 5; g++) { let pr = 1; for (let j = 0; j < n; j++) pr *= lgs((sa - SQ[j]) / SG_AIR + GHZ[g]); p += GHW[g] * pr; }
+  return p;
+}
+// 浮き球が場内に落ちる確率: 蹴りの誤差（向きの誤差で横に sp m、速さの誤差で飛距離に sr m）で、狙い点のまわりにばらつく。タッチライン・ゴールラインの外へ出ると相手ボール（26m以上の浮き球が場外へ出る割合: バウンドの水平の残りが 0.9 のとき約3割、0.75（v19）で約2%）
+const ROLL = 2; // 着地したあと弾んで転がる分（m）。ラインまでの余裕から引く
+const landIn = (dx, dy, ux, uy, sp, sr) => {
+  const sy = Math.sqrt(sp * sp * ux * ux + sr * sr * uy * uy) + 0.3, sx = Math.sqrt(sp * sp * uy * uy + sr * sr * ux * ux) + 0.3;
+  return lgs((HW - Math.abs(dy) - ROLL * Math.abs(uy)) / sy) * lgs((HL - Math.abs(dx) - ROLL * Math.abs(ux)) / sx);
+};
+const lobC = []; // 浮き球の計画（着地までの時間・水平の初速）は距離だけで決まるので、0.5m刻みで覚えておく
+const lobMemo = (D) => { const i = Math.round(D * 2); return lobC[i] || (lobC[i] = lobPlan(i / 2)); };
+const LOB_K = 1.0, AIR_H = 1.9; // 浮き球の見込みの調整・接触の高さ 1.5m での空中の難しさ（brain.js の onTouch: 1.5×(1.5-0.9)+1）
+
 export function lureOf(ap, line) { return ap.lureK > 0 ? ap.lureK * clamp((LURE_L0 - line) / LURE_W, 0, 1) : 0; }
 
 // 攻め方（中央から ←→ サイドから）: 行き先の価値を、横位置で増減する倍率。敵陣のほうが強く効く。指示が 0 なら 1
@@ -283,11 +318,12 @@ export function decide(m, i) {
       const sg = D * Math.max(0.02, 0.1 - 0.0045 * pas) * pe;
       p *= 1 / (1 + (sg * sg) / 10.24);
     } else {
-      let n = 0; // 浮き球: 着地点の周りの相手の数
-      for (let q = o0; q < o0 + 11; q++) { const qx = px[q] - dx, qy = py[q] - dy; if (qx * qx + qy * qy < 49) n++; }
-      p = clamp(0.66 - 0.13 * n + 0.01 * ab[B + AB.TRP], 0.15, 0.8) * 0.55; // 競り合い・ファーストタッチ・ラインを割るぶんを織り込む（実測に合わせた）
+      const lp = lobMemo(D); // 浮き球: 着地点で、空中の競り合いに勝つ（aerialP）→ 浮いたボールを止める（onTouch と同じ式）
+      const tm = touchMean(ab[B + AB.TRP], ab[B + AB.CMP], 0.9 * lp.vh, PA0 + PA1 * pd, true, K_LQ * (lng - (gk ? GK_ANCHOR.GKD : 10))) + 0.2 * ab[B + AB.HED] - AIR_H;
+      p = clamp(aerialP(m, j, dx, dy, lp.T, k, aw), 0.02, 1) * clamp(1 / (1 + exp(-0.681 * tm)), 0.05, 0.99) * LOB_K;
       const sg = D * Math.max(0.03, 0.12 - 0.005 * lng) * pe;
       p *= 1 / (1 + (sg * sg) / 20.25);
+      p *= landIn(dx, dy, ex / D, ey / D, sg, 0.06 * D); // ラインを割る
       p *= lobSafe(m, o0, x, y, dx, dy, aw); // 蹴り出しで止められる
     }
     let xtv = xt(dfx, dfy), lp = D > 26 ? ap.longPen - ap.longBon : 0;

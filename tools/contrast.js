@@ -27,6 +27,6 @@ if (isMainThread) {
     const m = createMatch(inp); run(m);
     const gl = [0, 0]; for (const e of m.log) if (e[1] === EV.GOAL) gl[e[2]]++;
     const S = (k, x) => m.N[I.ST + k * ST_N + ST[x]];
-    parentPort.postMessage({ gd: gl[0] - gl[1], 'icpt0-1': S(0, 'ICPT') - S(1, 'ICPT'), 'tkl0-1': S(0, 'TKL') - S(1, 'TKL'), 'passOk0': 100 * S(0, 'PASSOK') / Math.max(1, S(0, 'PASS')), 'passOk1': 100 * S(1, 'PASSOK') / Math.max(1, S(1, 'PASS')), 'pass0-1': S(0, 'PASS') - S(1, 'PASS'), 'miss0-1': S(0, 'MISC') - S(1, 'MISC'), 'shots0-1': m.N[I.SHOTS] - m.N[I.SHOTS + 1] });
+    parentPort.postMessage({ gd: gl[0] - gl[1], 'icpt0-1': S(0, 'ICPT') - S(1, 'ICPT'), 'tkl0-1': S(0, 'TKL') - S(1, 'TKL'), 'passOk0': 100 * S(0, 'PASSOK') / Math.max(1, S(0, 'PASS')), 'passOk1': 100 * S(1, 'PASSOK') / Math.max(1, S(1, 'PASS')), 'pass0-1': S(0, 'PASS') - S(1, 'PASS'), 'miss0-1': S(0, 'MISC') - S(1, 'MISC'), 'shots0-1': m.N[I.SHOTS] - m.N[I.SHOTS + 1], 'airD': S(0, 'AIRD'), 'airW0%': 100 * S(0, 'AIRW') / Math.max(1, S(0, 'AIRD')), 'lob0+1': S(0, 'LOB') + S(1, 'LOB') });
   });
 }

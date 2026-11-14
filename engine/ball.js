@@ -5,6 +5,7 @@ const G = 9.80665; // 重力 (m/s²)
 const C_AIR = 0.0135; // 空気抵抗の係数 (1/m)。加速度 = -C·|v|·v
 const K_ROLL = 0.5; // 転がり抵抗 (1/s)。芝の上を20m/sで転がすと約40mで止まる
 const E_BOUNCE = 0.6; // バウンドの反発
+const BOUNCE_H = 0.75; // バウンドのとき水平の速さが残る割合（芝との摩擦。v19: 0.9→0.75）
 const SUB = 4; // 1tickを何分割して積分するか（高速のボールが選手をすり抜けないように）
 
 // stepBall の戻り値
@@ -35,7 +36,7 @@ export function stepBall(F, o, h) {
       if (vz < 0) {
         vz = -vz * E_BOUNCE;
         if (vz < 0.8) vz = 0;
-        vx *= 0.9; vy *= 0.9;
+        vx *= BOUNCE_H; vy *= BOUNCE_H;
       }
     }
     if (x > HL || x < -HL) {

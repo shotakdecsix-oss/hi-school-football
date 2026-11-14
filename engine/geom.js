@@ -11,6 +11,13 @@ export const TOUCH_P1 = 10, TOUCH_P2 = 3;
 export const touchMean = (trp, cmp, vb, press, pass = true, pq = 0) => 3 + 0.8 * trp + 0.2 * cmp - 0.3 * vb + pq - (pass ? TOUCH_P1 * press + TOUCH_P2 * press * press : 5 * press); // pq: 蹴った人のパスの質（足元へ・止めやすい強さと回転。PAS・LNG が基準より高いほど +）
 export const K_PQ = 0.5, K_LQ = 0.4; // パスの質の効き（1点あたり）: 地面のパス（PAS）・浮き球（LNG。GK は GKD）
 export const K_RD = 0.1, K_MKL = 0.06, K_OFL = 0.08, K_WRK = 0.05, K_SEP = 0.08, K_CT = 0.4, K_CS = 0.03; // 動き出し（OFF）1点あたりの、パスを受けるときの圧力の減り・集中力（CON）1点あたりのファーストタッチの加点とパスの誤差の減り（疲れているほど効く） // 読み（POS・MRK）1点あたりのボールに届く範囲の増え・マークの見失いの減り・相手の動き出し（OFF）1点あたりの見失いの増え・運動量（WRK）1点あたりの寄せる走りの強さ
+// 空中の競り合い（v19）。ボールが Z_AIR m より高いところで、通り道の R_AIR m 以内に相手と味方が来ると、点数の高い選手が先に触る。
+// 点数 = JMP・HED・STR（実効値）の重み付き + ボールへの近さ + 乱数（σ=SG_AIR）。GKは手が使えるので K_GB だけ有利で、点数は JMP・GKH から。
+// brain.js の aerialDuel（実際の接触）と decide.js の aerialP（パスの見込み）が、同じ式を使う。
+export const Z_AIR = 0.9, R_AIR = 1.8, SG_AIR = 1.0;
+export const K_AJ = 0.5, K_AH = 0.35, K_AS = 0.15, K_AC = 0.8, K_GB = 1.5, K_AGH = 0.4, K_AM = 1.0;
+export const airScore = (hed, jmp, str, d) => K_AJ * (jmp - 10) + K_AH * (hed - 10) + K_AS * (str - 10) + K_AC * (1 - d / R_AIR);
+export const airScoreGK = (jmp, gkh, d, rr) => K_AJ * (jmp - 10) + K_AGH * (gkh - 13) + K_GB + K_AC * (1 - d / rr);
 export const K_ROLL = 0.5; // ball.js の転がり抵抗と同じ
 export const R_CTRL = 0.8; // 足元のボールに触れられる距離 (m)
 export const REACT_BASE = 0.4; // ボールの動きを見て動き出すまでの基本の遅れ (秒)。反応(ANT)が低いと +0.02秒/点

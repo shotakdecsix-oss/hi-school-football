@@ -9,7 +9,7 @@ import { ROLE } from '../data/formations.js';
 import { BALL_EV, stepBall } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
-import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_LQ, K_CT } from './geom.js';
+import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_LQ, K_CT, Z_AIR, R_AIR, SG_AIR, K_AM, airScore, airScoreGK } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM, lureOf } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 import { lagOf, blindOf } from './percept.js';
@@ -653,7 +653,7 @@ function keeperTouch(m, p, vb) {
 }
 
 // 選手 p が自由なボールに触れた: 速すぎる・圧力が強いと、ファーストタッチが乱れてボールが弾む
-function onTouch(m, p) {
+function onTouch(m, p, bonus = 0) { // bonus: 空中の競り合いに大きく勝ったときの、触り方の良さ（点数の差 × K_AM）
   const { F, N, team, slot, ab, px, py, t, seed } = m, k = team[p], A = p * NAB;
   const vb = Math.sqrt(F[F_B + 3] * F[F_B + 3] + F[F_B + 4] * F[F_B + 4]);
   if (slot[p] === 0) { keeperTouch(m, p, vb); return; }
@@ -662,7 +662,7 @@ function onTouch(m, p) {
   const bz = F[F_B + 2], air = bz > 0.9 ? 1.5 * (bz - 0.9) + (bz > 1.4 ? 1 : 0) : 0; // 浮いたボールは難しい（ヘディング・胸）
   let pq = 0; // 味方のパスを受けるとき: 蹴った人のパスの質（浮き球は LNG・GKは配球 GKD、地面のパスは PAS）
   if (N[I.PASSK] === k) { const ps = N[I.LAST]; if (ps >= 0 && ps !== p && team[ps] === k) pq = bz > 0.5 ? K_LQ * (slot[ps] === 0 ? ab[ps * NAB + AB.GKD] - GK_ANCHOR.GKD : ab[ps * NAB + AB.LNG] - 10) : K_PQ * (ab[ps * NAB + AB.PAS] - 10); }
-  const q = touchMean(ab[A + AB.TRP], ab[A + AB.CMP], vb, press, N[I.PASSK] >= 0, pq + K_CT * (ab[A + AB.CON] - 10) * (1 + 2 * (1 - F[F_STA + p]))) + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - air + 2.5 * normal4(seed, t, p, 60);
+  const q = touchMean(ab[A + AB.TRP], ab[A + AB.CMP], vb, press, N[I.PASSK] >= 0, pq + K_CT * (ab[A + AB.CON] - 10) * (1 + 2 * (1 - F[F_STA + p]))) + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - air + bonus + 2.5 * normal4(seed, t, p, 60);
   if (q >= 0) { takeControl(m, p); return; }
   const a = atan2(F[F_B + 4], F[F_B + 3]) + normal4(seed, t, p, 61), v = Math.max(2, vb * 0.45);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;
@@ -670,23 +670,45 @@ function onTouch(m, p) {
   N[I.ST + k * ST_N + ST.MISC]++;
 }
 
-// 前tick→今tickのボールの軌跡に一番近づいた選手が触る
+// 空中の競り合いの作業用（1回の呼び出しの中だけで使う。状態ではない）
+const CND = new Int32Array(NP), CDS = new Float64Array(NP);
+
+// 前tick→今tickのボールの軌跡に一番近づいた選手が触る。頭・胸の高さ（Z_AIR より上）のボールは、通り道の R_AIR m 以内に相手と味方がそろったら空中の競り合い（aerialDuel）
 function looseTouch(m) {
   const { px, py, team, slot, cd, rgk, F, N } = m;
   const ax = F[F_B + 6], ay = F[F_B + 7], bx = F[F_B], by = F[F_B + 1], bz = F[F_B + 2];
   const ex = bx - ax, ey = by - ay, ee = ex * ex + ey * ey;
   const lock = N[I.LOCK] > 0 ? N[I.LOCKT] : -1, pk = N[I.RECV] >= 0 ? N[I.PASSK] : -1; // pk: 飛んでいるパスを蹴ったチーム
-  let best = -1, bd = 1e18;
+  const air = bz > Z_AIR;
+  let best = -1, bd = 1e18, nc = 0, nt = 0;
   for (let i = 0; i < NP; i++) {
     if (cd[i] > 0 || (lock >= 0 && team[i] !== lock)) continue;
     const gk = slot[i] === 0;
     if (bz > (gk ? 2.5 : 2.0)) continue; // 頭・胸で受けられる高さまで
     let s = ee > 1e-9 ? ((px[i] - ax) * ex + (py[i] - ay) * ey) / ee : 1;
     s = s < 0 ? 0 : s > 1 ? 1 : s;
-    const dx = ax + ex * s - px[i], dy = ay + ey * s - py[i], d2 = dx * dx + dy * dy, rr = gk ? rgk[i] : pk >= 0 && team[i] !== pk ? R_CTRL * m.rdK[i] : R_CTRL; // 相手のパスには、守備の読みで届く範囲が変わる
+    const dx = ax + ex * s - px[i], dy = ay + ey * s - py[i], d2 = dx * dx + dy * dy, opp = pk >= 0 && team[i] !== pk, rk = opp ? m.rdK[i] : 1;
+    const rr = gk ? rgk[i] : R_CTRL * rk; // 相手のパスには、守備の読みで届く範囲が変わる
     if (d2 < rr * rr && d2 < bd) { bd = d2; best = i; }
+    if (air) { const ra = gk ? rgk[i] : R_AIR * rk; if (d2 < ra * ra) { CND[nc] = i; CDS[nc++] = d2; nt |= 1 << team[i]; } }
   }
-  if (best >= 0) onTouch(m, best);
+  if (best < 0) return;
+  if (nt === 3) aerialDuel(m, nc); else onTouch(m, best);
+}
+
+// 空中の競り合い: 加わった選手の点数（JMP・HED・STR＋近さ＋乱数。GKは手が使える）が一番高い選手が先に触る。大きく勝つほどきれいに触れる（onTouch の bonus）。
+// 触ったあとは onTouch が、止める（きれいに勝つ）か、はじく（触るだけ＝こぼれ球）かを決める。decide.js の aerialP が、同じ式で見込みを見積もる。
+function aerialDuel(m, nc) {
+  const { team, slot, ab, rgk, N, t, seed } = m;
+  let w = -1, ws = -1e9, w2 = -1e9;
+  for (let c = 0; c < nc; c++) {
+    const i = CND[c], A = i * NAB, d = Math.sqrt(CDS[c]);
+    const sc = (slot[i] === 0 ? airScoreGK(ab[A + AB.JMP], ab[A + AB.GKH], d, rgk[i]) : airScore(ab[A + AB.HED], ab[A + AB.JMP], ab[A + AB.STR], d)) + SG_AIR * normal4(seed, t, i, 71);
+    if (sc > ws) { w2 = ws; ws = sc; w = i; } else if (sc > w2) w2 = sc;
+  }
+  N[I.ST + ST.AIRD]++; N[I.ST + ST_N + ST.AIRD]++; // 両チームが加わった競り合い
+  N[I.ST + team[w] * ST_N + ST.AIRW]++;
+  onTouch(m, w, K_AM * (ws - w2));
 }
 
 // ボール保持者 o に、相手が足を出す。奪えるか（きれいに奪う／こぼれる／かわされる）は両者の能力と、

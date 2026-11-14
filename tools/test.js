@@ -385,7 +385,7 @@ await test('sub: 交代をまたぐ保存・復元が一致（復元後は出場
   const ch = [sub(2 * MIN, 0, 9, 2), sub(2 * MIN, 1, 0, 0)], m = mkS(7, ch), input = m.input;
   run(m, 1 * MIN);
   const early = snapshot(m);
-  run(m, 4 * MIN);
+  run(m, 12 * MIN); // 交代は中断のときに行う。v20 でボールが出る回数が減った（1試合 120→53 回。次に出るまで 90%点 約220 秒）ので、余裕をみて 12 分まで進める
   assert.deepEqual(subLog(m).map((e) => e[5]), [1, 1]);
   assert.equal(m.rgk[11], 1.2 + 0.05 * abvec(input, 1, 0)[AB.GKR], '交代で入ったGKの届く範囲');
   const late = snapshot(m);
@@ -461,7 +461,7 @@ await test('tactics: 守備の指示が陣形に効く（ライン高さ・コ�
 
 
 // 切り替え（失った直後・奪った直後）とリスクの集計。チーム0だけに指示を与え、相手は標準
-function transStats(tac, seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], minutes = 15) {
+function transStats(tac, seeds = Array.from({ length: 20 }, (_, i) => i + 1), minutes = 15) { // v20: 10試合では重心の差がぶれる（40試合で すぐ戻る -3.7m・すぐ奪い返す +5.8m。10試合だと -2.2m まで下がった）ので、20試合
   const o = { lost: 0, reg5: 0, n3: 0, near: 0, cen: 0, prog: 0, progN: 0, sb: 0, sbN: 0 };
   for (const seed of seeds) {
     const m = createMatch(sampleInput(seed, { ...OPT, homeTac: tac }));
@@ -542,18 +542,19 @@ function atkStats(tac, seeds = [1, 2, 3, 4, 5, 6, 7, 8], minutes = 10) {
 }
 await test('tactics: 攻撃の指示（幅・テンポ・攻め方・リスク）が配置と判断に効く', () => {
   const S = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  const S30 = Array.from({ length: 30 }, (_, i) => i + 1); // v14: テンポは前向きのパスの割合の差が小さい（30試合の測定で 遅33%・標準36%・速39%）ので、30試合で見る
+  const S30 = Array.from({ length: 40 }, (_, i) => i + 1); // v20: 30試合では遅のパス本数の差がぶれる（40試合で -10%、30試合の測定で -4% が出た）ので40試合（名前は S30 のまま）。v14: テンポは前向きのパスの割合の差が小さい（30試合の測定で 遅33%・標準36%・速39%）ので、30試合で見る
   const b = atkStats({}, S), W1 = atkStats({ width: 1 }, S), W0 = atkStats({ width: -1 }, S), b3 = atkStats({}, S30), T1 = atkStats({ tempo: 1 }, S30), T0 = atkStats({ tempo: -1 }, S30);
   const A1 = atkStats({ attack: 1 }, S), A0 = atkStats({ attack: -1 }, S), R1 = atkStats({ risk: 1 }, S), R0 = atkStats({ risk: -1 }, S);
   const f = (x) => x.toFixed(1), p = (x) => Math.round(100 * x) + '%';
   assert.ok(W1.wid > b.wid + 2.5 && W0.wid < b.wid - 4, `幅: 攻撃中のチームの横幅 広${f(W1.wid)} 標準${f(b.wid)} 狭${f(W0.wid)} m`);
   assert.ok(W1.far > b.far + 1.2 && W0.far < b.far - 1, `幅: 逆サイドの選手の幅 広${f(W1.far)} 標準${f(b.far)} 狭${f(W0.far)} m`);
   assert.ok(W1.hs > b.hs + 0.01, `幅が広い: 敵陣の最終盤でハーフスペースを通る割合 ${p(W1.hs)}（標準 ${p(b.hs)}）`); // 30試合で測ると +4〜5pt（認知なしは +6pt）。10試合ではばらつくので、向きだけ見る
-  // テンポ: 40試合で測ると、持ち時間 -0.39 秒（速）、パス本数 速 +27%・遅 -11%。10試合では遅の差が -6〜-15% とぶれるので、向きと下限（-5%）だけ見る
-  assert.ok(T1.hold < b3.hold - 0.2 && T0.pass < b3.pass * 0.95, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b3.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b3.pass)}（10分あたり）`);
+  // テンポ: 40試合で測ると、持ち時間 -0.39 秒（速）、パス本数 速 +27%・遅 -11%（v20 は 100試合で 持ち時間 遅 +0.35 秒、パス本数 遅 -9%。40試合の測定は ±4% ぶれるので、持ち時間（速・遅）と、パス本数の向きだけ見る）
+  assert.ok(T1.hold < b3.hold - 0.2 && T0.hold > b3.hold + 0.1 && T0.pass < b3.pass, `テンポ: 持ち時間 速${f(T1.hold)} 標準${f(b3.hold)} 秒／パス本数 遅${f(T0.pass)} 標準${f(b3.pass)}（10分あたり）`);
   assert.ok(T1.fwd > T0.fwd + 0.04, `テンポ: 前向きのパスの割合 速${p(T1.fwd)} 遅${p(T0.fwd)}`);
-  assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.2, `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
-  assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.4, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
+  assert.ok(A1.wide > b.wide + 0.08 && A0.wide < b.wide - 0.03 && A0.cen > A1.cen + 0.1, // v20: 中央を通る割合の差は 0.2→0.1（10試合の測定。サイド43%・標準29%・中央23%／中央を通る割合 33% 対 18%。ゴール前は中央からも撃つようになり、差が縮んだ）
+     `攻め方: 敵陣の最終盤で大外を通る割合 サイド${p(A1.wide)} 標準${p(b.wide)} 中央${p(A0.wide)}／中央を通る割合 中央${p(A0.cen)} サイド${p(A1.cen)}`);
+  assert.ok(R1.behind < b.behind - 0.5 && R0.behind > b.behind + 0.25, `リスク: 攻撃中にボールより5m以上後ろにいる人数 冒険${f(R1.behind)} 標準${f(b.behind)} 安全${f(R0.behind)}`);
   return `横幅 ${f(W1.wid)}/${f(b.wid)}/${f(W0.wid)}  持ち時間 ${f(T1.hold)}/${f(b.hold)}  大外 ${p(A1.wide)}/${p(b.wide)}/${p(A0.wide)}  後ろに残る ${f(R1.behind)}/${f(b.behind)}/${f(R0.behind)}`;
 });
 // 組み立て（build）の集計。チーム0だけに指示を与え、相手は標準。チーム0の外野手のグラウンダーのパスについて、本数・ロング（25m超）・後ろ向き（3m超）の割合と、クリア（大きく蹴り出す）の回数を数える

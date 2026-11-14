@@ -28,7 +28,20 @@ export function timeToCover(d, vmax, acc) {
   return d <= (vmax * vmax) / (2 * acc) ? Math.sqrt((2 * d) / acc) : d / vmax + vmax / (2 * acc);
 }
 
+// いま初速 v0（向かう向きの成分。0 以上）で走っている選手が、距離 d を走りきる時間。v0=0 なら timeToCover と同じ。走り込んでいる味方へ出すパスの「受け手が着く時間」に使う
+export function timeToCoverV(d, v0, vmax, acc) {
+  if (d <= 0) return 0;
+  if (v0 >= vmax) return d / vmax;
+  const dA = (vmax * vmax - v0 * v0) / (2 * acc);
+  return d <= dA ? (Math.sqrt(v0 * v0 + 2 * acc * d) - v0) / acc : (vmax - v0) / acc + (d - dA) / vmax;
+}
+
 // ボールを持つ価値（その位置から最終的に得点に結びつく見込みの目安）。敵ゴールに近く、中央ほど高い。
+// xtA は「前へ進んでいる」ぶんの価値（ゴール前の価値を除いたもの）。decide.js のゴール前の上限（zoneCap）と、撃つときに手放さずに済む価値（SHOT の cash）が使う
+export function xtA(fx, fy) {
+  const s = c01((fx + HL) / (2 * HL)), c = c01(1 - Math.abs(fy) / 30);
+  return (0.004 + 0.045 * s * s) * (0.5 + 0.5 * c);
+}
 export function xt(fx, fy) {
   const s = c01((fx + HL) / (2 * HL)), s2 = s * s, s4 = s2 * s2;
   const c = c01(1 - Math.abs(fy) / 30);

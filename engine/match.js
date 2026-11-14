@@ -113,7 +113,7 @@ export function createMatch(inp) {
   N[I.SUBT] = N[I.SUBT + 1] = -1; N[I.PAUSET] = -1;
   for (let i = 0; i < NP; i++) N[I.OCC + i] = -1; // 全員が先発
   N[I.LAST] = -1;
-  N[I.CHGT] = NO_CHG;
+  N[I.CHGT] = NO_CHG; N[I.POSST] = -1;
   resetTouches(N);
   N[I.HALF] = 1;
   placeKickoff(m, 0);
@@ -215,7 +215,7 @@ function placeKickoff(m, kteam) {
   F[F_B] = F[F_B + 1] = F[F_B + 3] = F[F_B + 4] = F[F_B + 5] = F[F_B + 6] = F[F_B + 7] = 0;
   F[F_B + 2] = BALL_R;
   N[I.LOCK] = 40; N[I.LOCKT] = kteam; N[I.PHASE] = PHASE.LIVE;
-  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE; N[I.CHGT] = NO_CHG;
+  N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = kteam; N[I.KICKT] = m.t; N[I.SETP] = SP.NONE; N[I.CHGT] = NO_CHG; N[I.POSST] = -1;
   if (m.pOn) initLook(m); // 全員がボールのほうを向く
 }
 
@@ -223,7 +223,7 @@ function pause(m, ticks, next, rteam) {
   const N = m.N;
   N[I.PHASE] = PHASE.PAUSE; N[I.TIMER] = ticks; N[I.NEXT] = next; N[I.RTEAM] = rteam;
   N[I.OWN] = -1; N[I.RECV] = -1; N[I.PASSK] = -1; N[I.SHOTK] = -1; N[I.POSS] = rteam; N[I.SETP] = SP.NONE;
-  N[I.PAUSET] = m.t; N[I.CHGT] = NO_CHG;
+  N[I.PAUSET] = m.t; N[I.CHGT] = NO_CHG; N[I.POSST] = -1;
   applySubs(m, false);
 }
 

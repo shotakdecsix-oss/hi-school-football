@@ -17,6 +17,7 @@
 import { NP, DT, F_B, F_FACE, F_SCN, N_LS, I, ACT, PHASE } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { atan2, cos, sin, wrapAngle, clamp, PI } from './core/math.js';
+import { f4 } from './core/rng.js';
 
 const D2R = PI / 180;
 export const NEAR_T1 = 10; // 味方は、この距離（m）まで気配で分かる（声・足音）。相手は NEAR1
@@ -28,6 +29,10 @@ const OPP_FLOOR = 0.4; // 見えていない相手の、最低限の把握（判
 const MEM_T = 3; // 味方を視野で見てから、位置を覚えていられる時間の目安（秒。気づきが高いほど長い）
 const SEEN_MIN = 0.5; // これ以上の見え方なら「はっきり見た」
 const HOLD_FOV = 0.8; // ボールを持っている選手の視野の広さ（持っていないときに対する倍率）
+// 首振り（v20）: 受ける前（パスが飛んでくる間）と、寄せられていないときにボールを持っている間は、首を振って周りの味方を確認し、位置を覚える。
+// 1 tick あたり、SC_RECV（受け手）・SC_FREE（保持者。圧力が SC_P 以上なら 0）× 気づき × 視野の補正 の確率で、SC_R m 以内の味方1人ずつを「見た」ことにする（N_LS を更新）。
+// 以前は、体の向き（正面の扇）にいない味方は 10m 以内の気配でしか分からず、背後の GK・CB に気づかない → 選択肢が無いと見て蹴り出していた
+const SC_RECV = 0.12, SC_FREE = 0.05, SC_P = 0.8, SC_R = 32;
 const FOCUS_MARK = 0.8; // マークの選手がボールと相手の「間」を向くときの、相手の重み（ボール 1 に対して）
 
 // 能力から決まる値（入力から決まる値。選手の入れ替えのたびに作り直す）
@@ -141,6 +146,17 @@ function pressOf(m, i) {
   return p > 1.5 ? 1.5 : p;
 }
 
+// 選手 i が、確率 p（1 tick あたり）で、SC_R m 以内の味方1人ずつを確認する
+function scanTeam(m, i, p) {
+  const { px, py, N, t, seed } = m, a = k0(i), x = px[i], y = py[i], q = p * (0.7 + 0.03 * m.ab[i * NAB + AB.VIS]);
+  for (let j = a; j < a + 11; j++) {
+    if (j === i) continue;
+    const dx = px[j] - x, dy = py[j] - y;
+    if (dx * dx + dy * dy > SC_R * SC_R) continue;
+    if (f4(seed, t, i, 700 + (j - a)) < q) N[N_LS + i * NP + j] = t;
+  }
+}
+
 // 1 tick ぶん、全員の向きと気づきを更新する（移動のあとに呼ぶ）
 export function look(m) {
   const { F, N, px, py, vx, vy, team, act, tgt, fcx, fcy, wTurn, rScan } = m;
@@ -190,5 +206,12 @@ export function look(m) {
   for (let i = 0; i < NP; i++) {
     const a = k0(i);
     for (let j = a; j < a + 11; j++) if (j !== i && seeAt(m, i, px[j], py[j], NEAR_T1) >= SEEN_MIN) N[N_LS + i * NP + j] = m.t;
+  }
+  // 首振り
+  const rv = N[I.RECV];
+  if (rv >= 0 && N[I.PASSK] === team[rv]) scanTeam(m, rv, SC_RECV * F[F_SCN + rv]);
+  if (own >= 0 && N[I.SETP] === 0) {
+    const pr = pressOf(m, own);
+    if (pr < SC_P) scanTeam(m, own, SC_FREE * F[F_SCN + own] * (1 - pr / SC_P));
   }
 }

@@ -626,6 +626,7 @@ export function takeControl(m, p) {
   const k = team[p], pk = N[I.PASSK];
   if (pk >= 0) N[I.ST + k * ST_N + (pk === k ? ST.PASSOK : ST.ICPT)]++; // パス成功か、相手に奪われたか
   if (N[I.POSS] !== k) N[I.CHGT] = m.t; // ボールを持つチームが入れ替わった（切り替えの窓の起点）
+  if (N[I.POSS] !== k || N[I.POSST] < 0) N[I.POSST] = m.t; // 保持の連なりの始まり（入れ替わったときと、中断・クリアのあとの最初のコントロール）
   N[I.PASSK] = -1; N[I.OWN] = p; N[I.POSS] = k; markTouch(m, p, m.t); N[I.RECV] = -1; N[I.SHOTK] = -1; N[I.GOT] = m.t;
   act[p] = ACT.CARRY; tgt[p] = -1;
   if (N[I.SETP] > 0) { tmr[p] = 14; tx[p] = px[p]; ty[p] = py[p]; pc[p] = 0; } // 再開: その場で少し周りを見てから蹴る

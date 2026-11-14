@@ -91,7 +91,8 @@ if (isMainThread) {
     const g = GROUPS[gi], b = f.b[i + 1], se = f.se[i + 1]; sum += b;
     console.log(g.name + '  ' + b.toFixed(3) + ' ±' + se.toFixed(3) + '  t=' + (b / se).toFixed(1) + '  ' + '#'.repeat(Math.max(0, Math.round(b * 40))));
   });
-  console.log('切片 ' + f.b[0].toFixed(3) + ' ±' + f.se[0].toFixed(3) + '（0に近いほど、チーム0・1に偏りなし）   Σβ（全グループ+1） ' + sum.toFixed(3));
+  const gt = mean('g0') + mean('g1'); // 得点が減ると得点差の傾きも同じ比で小さくなる。得点の量が違う版どうしは Σβ÷得点合計 で比べる（効きの強さの比。版が変わっても動かないはず）
+  console.log('切片 ' + f.b[0].toFixed(3) + ' ±' + f.se[0].toFixed(3) + '（0に近いほど、チーム0・1に偏りなし）   Σβ（全グループ+1） ' + sum.toFixed(3) + '   Σβ÷得点合計 ' + (sum / gt).toFixed(3));
 } else {
   const { createMatch, run } = await import('../engine/match.js');
   const { sampleInput } = await import('../engine/sample.js');

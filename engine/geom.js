@@ -8,7 +8,9 @@ const c01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 // 圧力が強いほど指数的に悪化する（圧力1.5で 10*1.5+3*2.25=21.8 → 密集の中でのパスはほぼ止められない）。
 export const TOUCH_P1 = 10, TOUCH_P2 = 3;
 // pass=false はこぼれ球（パスではない自由なボール）。奪い合いなので、圧力の影響は小さい（ボールを弾き合い続けない）。
-export const touchMean = (trp, cmp, vb, press, pass = true) => 3 + 0.8 * trp + 0.2 * cmp - 0.3 * vb - (pass ? TOUCH_P1 * press + TOUCH_P2 * press * press : 5 * press);
+export const touchMean = (trp, cmp, vb, press, pass = true, pq = 0) => 3 + 0.8 * trp + 0.2 * cmp - 0.3 * vb + pq - (pass ? TOUCH_P1 * press + TOUCH_P2 * press * press : 5 * press); // pq: 蹴った人のパスの質（足元へ・止めやすい強さと回転。PAS・LNG が基準より高いほど +）
+export const K_PQ = 0.5, K_LQ = 0.4; // パスの質の効き（1点あたり）: 地面のパス（PAS）・浮き球（LNG。GK は GKD）
+export const K_RD = 0.1, K_MKL = 0.06, K_OFL = 0.08, K_WRK = 0.05, K_SEP = 0.08, K_CT = 0.4, K_CS = 0.03; // 動き出し（OFF）1点あたりの、パスを受けるときの圧力の減り・集中力（CON）1点あたりのファーストタッチの加点とパスの誤差の減り（疲れているほど効く） // 読み（POS・MRK）1点あたりのボールに届く範囲の増え・マークの見失いの減り・相手の動き出し（OFF）1点あたりの見失いの増え・運動量（WRK）1点あたりの寄せる走りの強さ
 export const K_ROLL = 0.5; // ball.js の転がり抵抗と同じ
 export const R_CTRL = 0.8; // 足元のボールに触れられる距離 (m)
 export const REACT_BASE = 0.4; // ボールの動きを見て動き出すまでの基本の遅れ (秒)。反応(ANT)が低いと +0.02秒/点

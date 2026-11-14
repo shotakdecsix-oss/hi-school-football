@@ -1,5 +1,6 @@
 // 能力の効きを「ランダムな割り当て＋回帰」で測る（エンジンレビュー #5）。
-//   node tools/sens.js [--n 480] [--seed 1] [--d 3] [--rules league] [--out 記録.jsonl] [--tacH key=v,…] [--tacA …]
+//   node tools/sens.js [--n 480] [--seed 1] [--d 3] [--rules league] [--out 記録.jsonl] [--tacH key=v,…] [--tacA …] [--only pass,off] [--gain PAS=0.5,LNG=0.5]
+//   --only: 測るグループだけ変える（他は 0。そのぶん少ない試合数で済む）。--gain: 能力ごとの効き倍率（engine/abil.js の AB_GA）を差し替えて測る
 // 1試合ごとに、能力のグループ（下の GROUPS）それぞれに、両チームとも -d〜+d の整数をランダムに足して走らせる（同じ値を外野手・控え全員に）。
 // 得点差（チーム0−チーム1）を、グループごとの差（チーム0の足した値−チーム1の足した値）で回帰する。割り当てがランダム・互いに無相関なので、
 // 1回の計測で全グループの効きが同時に出る（片側だけ上げる実験を能力の数だけ回さなくてよい）。傾き β = 能力+1（そのグループ全員）あたりの得点差/試合。
@@ -7,7 +8,7 @@
 //   読み方: 効きが 0 に近い能力＝育成しても試合に出ない（死んでいる）／突出している能力＝他を食う。「全部+1」の和は能力が一律に+1 違うチームどうしの差に近い。
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import fs from 'node:fs';
-import { AB } from '../engine/abil.js';
+import { AB, AB_GA } from '../engine/abil.js';
 
 export const GROUPS = [
   { key: 'speed', name: '速さ（SPD・ACC）', idx: [AB.SPD, AB.ACC] },
@@ -61,9 +62,12 @@ export function ols(X, y) {
 if (isMainThread) {
   const N = +arg('n', 480), s0 = +arg('seed', 1), D = +arg('d', 3), rkey = arg('rules', 'league'), out = arg('out', '');
   const tacH = arg('tacH', ''), tacA = arg('tacA', '');
+  const onlyKeys = arg('only', ''), only = onlyKeys ? onlyKeys.split(',').map((k) => GROUPS.findIndex((g) => g.key === k)) : null;
+  if (only && only.some((i) => i < 0)) { console.log('--only は ' + GROUPS.map((g) => g.key).join(' / ') + ' から選ぶ'); process.exit(2); }
+  const gain = Object.fromEntries(String(arg('gain', '')).split(',').filter(Boolean).map((kv) => { const [k, v] = kv.split('='); if (!(k in AB) || !Number.isFinite(+v)) { console.log('--gain は 能力名=倍率（例 PAS=0.5）'); process.exit(2); } return [k, +v]; }));
   const { RULES } = await import('../data/rules.js');
   if (!RULES[rkey]) { console.log('--rules は ' + Object.keys(RULES).join(' / ') + ' から選ぶ'); process.exit(2); }
-  const jobs = Array.from({ length: N }, (_, i) => ({ seed: s0 + i, D, rkey, tacH: parseTac(tacH), tacA: parseTac(tacA) }));
+  const jobs = Array.from({ length: N }, (_, i) => ({ seed: s0 + i, D, rkey, tacH: parseTac(tacH), tacA: parseTac(tacA), only, gain }));
   const rows = []; let next = 0; const t0 = Date.now();
   if (out) fs.writeFileSync(out, '');
   await new Promise((resolve) => {
@@ -76,14 +80,15 @@ if (isMainThread) {
     }
   });
   rows.sort((a, b) => a.seed - b.seed);
-  const X = rows.map((r) => r.o0.map((v, g) => v - r.o1[g])), y = rows.map((r) => r.g0 - r.g1);
+  const cols = only || GROUPS.map((_, g) => g); // 回帰に入れるグループ
+  const X = rows.map((r) => cols.map((g) => r.o0[g] - r.o1[g])), y = rows.map((r) => r.g0 - r.g1);
   const f = ols(X, y);
   const mean = (k) => rows.reduce((a, r) => a + r[k], 0) / rows.length;
   console.log('能力の効き（回帰）  ' + N + '試合（種 ' + s0 + '〜' + (s0 + N - 1) + '）  規定 ' + rkey + '  足す値 ±' + D + '  1試合の得点 ' + mean('g0').toFixed(2) + ' - ' + mean('g1').toFixed(2) + '  得点差の残りのばらつき ' + f.sd.toFixed(2) + '  R² ' + f.r2.toFixed(3));
   console.log('傾き β = そのグループが+1（全員）のときの得点差/試合。t = β/SE（2未満は0と区別できない）');
   let sum = 0;
-  GROUPS.forEach((g, i) => {
-    const b = f.b[i + 1], se = f.se[i + 1]; sum += b;
+  cols.forEach((gi, i) => {
+    const g = GROUPS[gi], b = f.b[i + 1], se = f.se[i + 1]; sum += b;
     console.log(g.name + '  ' + b.toFixed(3) + ' ±' + se.toFixed(3) + '  t=' + (b / se).toFixed(1) + '  ' + '#'.repeat(Math.max(0, Math.round(b * 40))));
   });
   console.log('切片 ' + f.b[0].toFixed(3) + ' ±' + f.se[0].toFixed(3) + '（0に近いほど、チーム0・1に偏りなし）   Σβ（全グループ+1） ' + sum.toFixed(3));
@@ -93,9 +98,10 @@ if (isMainThread) {
   const { RULES } = await import('../data/rules.js');
   const { hash4 } = await import('../engine/core/rng.js');
   const { EV } = await import('../engine/consts.js');
-  parentPort.on('message', ({ seed, D, rkey, tacH, tacA }) => {
+  parentPort.on('message', ({ seed, D, rkey, tacH, tacA, only, gain }) => {
+    for (const [k, v] of Object.entries(gain || {})) AB_GA[AB[k]] = v;
     const inp = sampleInput(seed, { rules: { ...RULES[rkey] }, homeTac: tacH, awayTac: tacA });
-    const o = [0, 1].map((k) => GROUPS.map((_, g) => Math.floor((hash4(seed, 7000 + g, k, 3) / 4294967296) * (2 * D + 1)) - D));
+    const o = [0, 1].map((k) => GROUPS.map((_, g) => (only && !only.includes(g) ? 0 : Math.floor((hash4(seed, 7000 + g, k, 3) / 4294967296) * (2 * D + 1)) - D)));
     [0, 1].forEach((k) => {
       for (const p of [...inp.teams[k].players, ...inp.teams[k].bench]) GROUPS.forEach((gr, g) => { for (const a of gr.idx) p.ab[a] = Math.min(20, Math.max(1, p.ab[a] + o[k][g])); });
     });

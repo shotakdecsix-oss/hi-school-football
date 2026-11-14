@@ -40,7 +40,7 @@ export function setLook(m, i) {
   const oh = out * HOLD_FOV, ih = oh > 30 * D2R ? oh - 30 * D2R : 0; // ボールを持っているときの扇
   m.cOutH[i] = cos(oh);
   m.cInH[i] = cos(ih);
-  m.wTurn[i] = (6 + 0.25 * agi) * DT; // 1 tick に向きを変えられる角度（rad）
+  m.wTurn[i] = (5 + 0.35 * agi) * DT; // 1 tick に向きを変えられる角度（rad）
   m.tLag[i] = clamp(0.5 - 0.015 * ant, 0.15, 0.5); // 見えていない相手の動きに気づくまでの遅れ（秒）
   m.rScan[i] = R_UP + R_UPV * (vis + dec) / 2;
 }
@@ -127,7 +127,7 @@ export function seeAll(m, i, full) {
 
 // 選手 i が相手 j の動きに気づくまでの遅れ（秒）。見えていれば 0、見えていないほど長い
 export function lagOf(m, i, j) {
-  return m.tLag[i] * (1 - senseAt(m, i, m.px[j], m.py[j]));
+  return m.tLag[i] * m.mkL[i] * m.ofL[j] * (1 - senseAt(m, i, m.px[j], m.py[j])); // マークが上手いほど見失いにくく、相手の動き出しが上手いほど見失いやすい
 }
 
 // 選手 i の周りの相手の圧力（decide.js の pressureAt と同じ式。循環 import を避けて持つ）

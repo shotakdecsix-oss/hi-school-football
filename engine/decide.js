@@ -1,12 +1,12 @@
 // 保持者の判断と実行（4層AIの「判断」と「実行」）。
 // 選択肢（シュート・パス・スペースへのパス・ドリブル・クリア）に点数をつけ、一番高いものを選ぶ。
 // 点数 = ボールを持つ価値(xt)の期待値。乱数は「見え方（点数の誤差）」と「蹴りの誤差」にだけ使う。
-import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, I, ACT, EV, ST, ST_N, SP, PHASE, dirOf } from './consts.js';
+import { HL, HW, GOAL_HW, GOAL_H, BALL_R, F_B, F_PASS, F_STA, I, ACT, EV, ST, ST_N, SP, PHASE, dirOf } from './consts.js';
 import { AB, NAB } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, log, exp, clamp } from './core/math.js';
-import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { xt, xgAt, groundPass, lobPlan, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_CS } from './geom.js';
 import { seeAll } from './percept.js';
 import { markTouch } from './touchlog.js';
 
@@ -226,7 +226,8 @@ export function startCarry(m, p, press) {
 // 蹴る。向きと強さに誤差が乗る。dx,dy=狙い点、v0=水平方向の初速、vz=上向きの初速
 function kick(m, i, dx, dy, v0, vz, sigAng, sigSpd, tg) {
   const { F, N, t, seed } = m, bx = F[F_B], by = F[F_B + 1];
-  const a = atan2(dy - by, dx - bx) + normal4(seed, t, i, tg) * sigAng;
+  const cs = clamp(1 - K_CS * (m.ab[i * NAB + AB.CON] - 10) * (1 + 2 * (1 - F[F_STA + i])), 0.5, 1.5); // 集中力: 疲れるほど、集中力の差が蹴りの誤差に出る
+  const a = atan2(dy - by, dx - bx) + normal4(seed, t, i, tg) * sigAng * cs;
   const v = v0 * (1 + normal4(seed, t, i, tg + 1) * sigSpd);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = vz;
   F[F_B + 6] = bx; F[F_B + 7] = by;
@@ -267,7 +268,7 @@ export function decide(m, i) {
     dx = clamp(dx, -HL + 1.5, HL - 1.5); dy = clamp(dy, -HW + 1.5, HW - 1.5);
     const ex = dx - x, ey = dy - y, D = Math.sqrt(ex * ex + ey * ey);
     if (D < 3 || D > 55 || (sp === SP.THROW && D > 24)) return;
-    const dfx = dx * dir, dfy = dy * dir, pd = pressureAt(m, dx, dy, k, aw);
+    const dfx = dx * dir, dfy = dy * dir, pd = pressureAt(m, dx, dy, k, aw) * m.sepK[j]; // 受け手が動き出しで離れられる分を見込む
     const air = sp === SP.CORNER && D > 8; // コーナーは浮き球でゴール前へ
     let p;
     if (D <= 26 && !air) {
@@ -278,7 +279,7 @@ export function decide(m, i) {
       const tr = 0.1 + timeToCover(Math.sqrt(rx * rx + ry * ry) - 0.5, vmax[j], acc[j]); // 受け手がそこへ着く時間
       const lag = tr - g.T;
       if (lag > 0.3) p *= clamp(1 - (lag - 0.3), 0, 1);
-      p *= clamp(1 / (1 + exp(-0.681 * touchMean(ab[B + AB.TRP], ab[B + AB.CMP], g.vA, PA0 + PA1 * pd))), 0.05, 0.99) * (space ? 0.94 : 1); // 受け手が止められる確率（onTouch と同じ式。1.702/2.5=0.681）。圧力は、決めた時の見込み pd ではなく到着時の実効値 PA0 + PA1×pd
+      p *= clamp(1 / (1 + exp(-0.681 * touchMean(ab[B + AB.TRP], ab[B + AB.CMP], g.vA, PA0 + PA1 * pd, true, K_PQ * (pas - 10)))), 0.05, 0.99) * (space ? 0.94 : 1); // 受け手が止められる確率（onTouch と同じ式。1.702/2.5=0.681）。圧力は、決めた時の見込み pd ではなく到着時の実効値 PA0 + PA1×pd
       const sg = D * Math.max(0.02, 0.1 - 0.0045 * pas) * pe;
       p *= 1 / (1 + (sg * sg) / 10.24);
     } else {

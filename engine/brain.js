@@ -2,14 +2,14 @@
 // 役割は N（N_ACT=役割、N_TGT=相手、N_TMR=タイマー）、目標は F（tx,ty,pc）に持つので、保存と復元ができる。
 // 役割の割り当ては8tickごと（状況が変わったときはすぐ）、目標の更新は毎tick。
 import {
-  NP, DT, HL, HW, GOAL_HW, BALL_R, PA_D, PA_HW, PHASE, NEXT, SP, F_B, F_R, F_PASS, F_SB, I, ACT, ST, ST_N, EV, PRED_N, PRED_TICKS, PRED_DT, dirOf,
+  NP, DT, HL, HW, GOAL_HW, BALL_R, PA_D, PA_HW, PHASE, NEXT, SP, F_B, F_R, F_PASS, F_SB, F_STA, I, ACT, ST, ST_N, EV, PRED_N, PRED_TICKS, PRED_DT, dirOf,
 } from './consts.js';
-import { AB, NAB } from './abil.js';
+import { AB, NAB, GK_ANCHOR } from './abil.js';
 import { ROLE } from '../data/formations.js';
 import { BALL_EV, stepBall } from './ball.js';
 import { normal4, f4 } from './core/rng.js';
 import { atan2, cos, sin, exp, clamp } from './core/math.js';
-import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE } from './geom.js';
+import { xt, passV0, rollRoom, timeToCover, touchMean, K_ROLL, R_CTRL, REACT_BASE, K_PQ, K_LQ, K_CT } from './geom.js';
 import { pressureAt, offsideLine, laneSafe, reactTicks, startCarry, touchHazard, winMode, latM, lureOf } from './decide.js';
 import { FRONT_W, LINE_W } from './tactic.js';
 import { lagOf, blindOf } from './percept.js';
@@ -280,7 +280,7 @@ function planGK(m, k, dir, own, att, bfx, bfy) {
     const bvx = F[F_B + 3] * dir, bvy = F[F_B + 4] * dir;
     if (bvx < -5) {
       const tc = ((F[F_B] * dir + HL) / -bvx) * 1.15, yc = F[F_B + 1] * dir + bvy * tc * 0.85;
-      const react = 4 + 0.55 * (20 - ab[i * NAB + AB.GKR]);
+      const react = 4 + 0.55 * (20 - ab[i * NAB + AB.GKR]) - (dg < 14 ? 0.3 * (ab[i * NAB + AB.GK1] - GK_ANCHOR.GK1) : 0); // 1対1: 近い距離のシュートへは、GK1 で反応が変わる
       const seen = N[I.SHOTK] !== 1 - k || m.t - N[I.SHOTT] >= react; // 撃たれてから反応するまでの遅れ
       if (seen && tc < 1.8 && Math.abs(yc) < GOAL_HW + 3) { fx = -HL + 0.8; fy = clamp(yc, -GOAL_HW - 1, GOAL_HW + 1); pc[i] = 1; }
     }
@@ -326,7 +326,7 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         if (m.pOn) { const lg = lagOf(m, i, q); ox -= m.vx[q] * lg; oy -= m.vy[q] * lg; } // 認知: 見えていない相手は、少し前の位置にいるつもりで守る（背後の走り込みに遅れる）
         const ux = gx - ox, uy = -oy, L = Math.sqrt(ux * ux + uy * uy) || 1;
         const wx = bx - ox, wy = by - oy, L2 = Math.sqrt(wx * wx + wy * wy) || 1;
-        const gs = (L2 < 12 ? 2 : L2 < 25 ? 3.5 : 5) * tc.gsK; // ボールから遠い相手ほど、ゆるく（深めに）見る
+        const gs = (L2 < 12 ? 2 : L2 < 25 ? 3.5 : 5) * tc.gsK * m.mkL[i]; // ボールから遠い相手ほど、ゆるく（深めに）見る。マークが上手いほど寄せる
         let mx = ox + (ux / L) * gs + (wx / L2) * tc.laneCut, my = oy + (uy / L) * gs + (wy / L2) * tc.laneCut; // 相手のゴール側に立つ（強度が高いほどボール側へ寄ってパスコースを切る）
         if (tc.hold > 0 && role[i] <= ROLE.D) { // ラインを守る選手は、持ち場（ライン）から前後に離れすぎない
           const hf = hx[i] * dir, mf = mx * dir;
@@ -361,6 +361,7 @@ function applyTargets(m, k, dir, att, own, bx, by, bfx, bfy) {
         if (tc.recPc > 0 && d2 > 25 && pc[i] < tc.recPc) pc[i] = tc.recPc;
       }
     }
+    if (pc[i] < 1 && act[i] !== ACT.CHASE && act[i] !== ACT.RECV) pc[i] = Math.min(1, pc[i] * m.wrkK[i]); // 運動量: ボールを持たない動きの走りの強さ
   }
   followNeighbors(m, k, dir, att, bx, by);
 }
@@ -579,7 +580,7 @@ export function movePlayers(m) {
       const dx = px[j] - px[i], dy = py[j] - py[i], d2 = dx * dx + dy * dy;
       if (d2 < 0.49 && d2 > 1e-9) {
         const d = Math.sqrt(d2), s = (0.7 - d) / (2 * d);
-        px[i] -= dx * s; py[i] -= dy * s; px[j] += dx * s; py[j] += dy * s;
+        px[i] = clamp(px[i] - dx * s, -HL - 2, HL + 2); py[i] = clamp(py[i] - dy * s, -HW - 2, HW + 2); px[j] = clamp(px[j] + dx * s, -HL - 2, HL + 2); py[j] = clamp(py[j] + dy * s, -HW - 2, HW + 2); // 重なりを離す（場外の余白の外へは押し出さない）
       }
     }
   }
@@ -642,10 +643,11 @@ export function takeControl(m, p) {
 function keeperTouch(m, p, vb) {
   const { F, N, team, ab, t, seed } = m, k = team[p], dir = dirOf(N, k);
   const shotOn = N[I.SHOTK] === 1 - k && t - N[I.SHOTT] < 100;
-  const lim = 11 + ab[p * NAB + AB.GKC] + 2 * normal4(seed, t, p, 62);
+  const gh = ab[p * NAB + AB.GKH] - GK_ANCHOR.GKH; // ハンドリング: しっかり掴める速さの上限が上がり、はじいたボールが危ない場所へ行きにくい
+  const lim = 11 + ab[p * NAB + AB.GKC] + 0.6 * gh + 2 * normal4(seed, t, p, 62);
   if (shotOn) { N[I.ST + k * ST_N + ST.SAVE]++; m.log.push([t, EV.SAVE, k, p]); N[I.SHOTK] = -1; }
   if (vb <= lim && F[F_B + 2] < 2.4) { takeControl(m, p); return; }
-  const a = atan2(0, dir) + normal4(seed, t, p, 63) * 0.9, v = 2 + 0.4 * vb; // フィールドの側へ、ばらつきながらはじく
+  const a = atan2(0, dir) + normal4(seed, t, p, 63) * clamp(0.9 - 0.05 * gh, 0.4, 1.4), v = (2 + 0.4 * vb) * clamp(1 - 0.03 * gh, 0.7, 1.3); // フィールドの側へ、ばらつきながらはじく
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;
   markTouch(m, p, t); N[I.KICKT] = t; m.cd[p] = 8; N[I.PASSK] = -1; N[I.RECV] = -1;
 }
@@ -655,9 +657,12 @@ function onTouch(m, p) {
   const { F, N, team, slot, ab, px, py, t, seed } = m, k = team[p], A = p * NAB;
   const vb = Math.sqrt(F[F_B + 3] * F[F_B + 3] + F[F_B + 4] * F[F_B + 4]);
   if (slot[p] === 0) { keeperTouch(m, p, vb); return; }
-  const press = pressureAt(m, px[p], py[p], k);
+  const rcv = N[I.PASSK] === k; // 味方のパスを受けるところか
+  const press = pressureAt(m, px[p], py[p], k) * (rcv ? m.sepK[p] : 1); // 動き出しが上手い選手は、相手から離れて受ける
   const bz = F[F_B + 2], air = bz > 0.9 ? 1.5 * (bz - 0.9) + (bz > 1.4 ? 1 : 0) : 0; // 浮いたボールは難しい（ヘディング・胸）
-  const q = touchMean(ab[A + AB.TRP], ab[A + AB.CMP], vb, press, N[I.PASSK] >= 0) + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - air + 2.5 * normal4(seed, t, p, 60);
+  let pq = 0; // 味方のパスを受けるとき: 蹴った人のパスの質（浮き球は LNG・GKは配球 GKD、地面のパスは PAS）
+  if (N[I.PASSK] === k) { const ps = N[I.LAST]; if (ps >= 0 && ps !== p && team[ps] === k) pq = bz > 0.5 ? K_LQ * (slot[ps] === 0 ? ab[ps * NAB + AB.GKD] - GK_ANCHOR.GKD : ab[ps * NAB + AB.LNG] - 10) : K_PQ * (ab[ps * NAB + AB.PAS] - 10); }
+  const q = touchMean(ab[A + AB.TRP], ab[A + AB.CMP], vb, press, N[I.PASSK] >= 0, pq + K_CT * (ab[A + AB.CON] - 10) * (1 + 2 * (1 - F[F_STA + p]))) + (bz > 1.4 ? 0.2 * ab[A + AB.HED] : 0) - air + 2.5 * normal4(seed, t, p, 60);
   if (q >= 0) { takeControl(m, p); return; }
   const a = atan2(F[F_B + 4], F[F_B + 3]) + normal4(seed, t, p, 61), v = Math.max(2, vb * 0.45);
   F[F_B + 3] = cos(a) * v; F[F_B + 4] = sin(a) * v; F[F_B + 5] = 1.5;
@@ -670,7 +675,7 @@ function looseTouch(m) {
   const { px, py, team, slot, cd, rgk, F, N } = m;
   const ax = F[F_B + 6], ay = F[F_B + 7], bx = F[F_B], by = F[F_B + 1], bz = F[F_B + 2];
   const ex = bx - ax, ey = by - ay, ee = ex * ex + ey * ey;
-  const lock = N[I.LOCK] > 0 ? N[I.LOCKT] : -1;
+  const lock = N[I.LOCK] > 0 ? N[I.LOCKT] : -1, pk = N[I.RECV] >= 0 ? N[I.PASSK] : -1; // pk: 飛んでいるパスを蹴ったチーム
   let best = -1, bd = 1e18;
   for (let i = 0; i < NP; i++) {
     if (cd[i] > 0 || (lock >= 0 && team[i] !== lock)) continue;
@@ -678,7 +683,7 @@ function looseTouch(m) {
     if (bz > (gk ? 2.5 : 2.0)) continue; // 頭・胸で受けられる高さまで
     let s = ee > 1e-9 ? ((px[i] - ax) * ex + (py[i] - ay) * ey) / ee : 1;
     s = s < 0 ? 0 : s > 1 ? 1 : s;
-    const dx = ax + ex * s - px[i], dy = ay + ey * s - py[i], d2 = dx * dx + dy * dy, rr = gk ? rgk[i] : R_CTRL;
+    const dx = ax + ex * s - px[i], dy = ay + ey * s - py[i], d2 = dx * dx + dy * dy, rr = gk ? rgk[i] : pk >= 0 && team[i] !== pk ? R_CTRL * m.rdK[i] : R_CTRL; // 相手のパスには、守備の読みで届く範囲が変わる
     if (d2 < rr * rr && d2 < bd) { bd = d2; best = i; }
   }
   if (best >= 0) onTouch(m, best);
@@ -701,8 +706,8 @@ function tackles(m, o) {
   const j = best, kj = 1 - k, A = o * NAB, B = j * NAB;
   const rx = px[o] - px[j], ry = py[o] - py[j], dd = Math.sqrt(rx * rx + ry * ry);
   const cs = dd > 0.01 ? ((vx[j] - vx[o]) * rx + (vy[j] - vy[o]) * ry) / dd : 0; // 寄せる速さ
-  const qd = 0.6 * ab[B + AB.TCK] + 0.3 * ab[B + AB.AGG] + 0.4 * clamp(cs, 0, 5);
-  const qc = 0.6 * ab[A + AB.DRI] + 0.25 * ab[A + AB.BAL] + 0.15 * ab[A + AB.STR] - (m.pOn ? BLIND * blindOf(m, o, j) : 0); // 認知: 見えていない側から寄せられると、ボールを守れない
+  const qd = 0.6 * ab[B + AB.TCK] + 0.3 * ab[B + AB.AGG] + 0.2 * (ab[B + AB.AGI] - 10) + 0.4 * clamp(cs, 0, 5); // 敏捷: 寄せる側は、相手の切り返しについていける
+  const qc = 0.6 * ab[A + AB.DRI] + 0.25 * ab[A + AB.BAL] + 0.15 * ab[A + AB.STR] + 0.3 * (ab[A + AB.AGI] - 10) - (m.pOn ? BLIND * blindOf(m, o, j) : 0); // 認知: 見えていない側から寄せられると、ボールを守れない
   if (f4(seed, t, j, 66) >= (0.05 + 0.004 * ab[B + AB.AGG]) * tcOf(m, kj).tklK) return; // 間合いに入っても、毎tick足を出すわけではない（プレス強度が高いほど出しやすい）
   const mg = qd - qc + 2.2 * normal4(seed, t, j, 64) - 0.5;
   N[I.ST + kj * ST_N + ST.TKL]++;

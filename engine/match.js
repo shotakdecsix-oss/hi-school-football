@@ -20,6 +20,7 @@ import { setLook, initLook, look, refreshFace, seeAt, senseAt, memOf, fovOf, NEA
 export { staminaOf } from './stamina.js';
 import { Digest } from './core/digest.js';
 import { clamp } from './core/math.js';
+import { K_RD, K_MKL, K_OFL, K_WRK, K_SEP } from './geom.js';
 import { goalCredit } from './touchlog.js';
 
 // input = { seed, teams: [ { formation, tactics, players: [ { id, ab } x11 ], bench: [ { id, ab } ... ] } x2 ], changes: [], rules }
@@ -62,7 +63,7 @@ export function createMatch(inp) {
     ab: new Float64Array(NP * NAB), vmax: new Float64Array(NP), acc: new Float64Array(NP), rgk: new Float64Array(NP),
     vmax0: new Float64Array(NP), acc0: new Float64Array(NP), sdr: new Float64Array(NP), srec: new Float64Array(NP), // 能力から決まる本来の最高速度・加速度と、スタミナの消耗・回復の倍率（vmax・acc は、そこから疲れ分を引いた今の値）
     cx0: new Float64Array(2), kick: new Uint8Array(2),
-    cIn: new Float64Array(NP), cOut: new Float64Array(NP), cInH: new Float64Array(NP), cOutH: new Float64Array(NP), wTurn: new Float64Array(NP), tLag: new Float64Array(NP), rScan: new Float64Array(NP), fov: new Float64Array(NP), // 認知: 視野の内側・外側の cos、向きを変える速さ、気づくまでの遅れ、気づきの上がる速さ、視野の半角（rad）（能力から決まる）
+    cIn: new Float64Array(NP), cOut: new Float64Array(NP), cInH: new Float64Array(NP), cOutH: new Float64Array(NP), wTurn: new Float64Array(NP), tLag: new Float64Array(NP), sepK: new Float64Array(NP), rdK: new Float64Array(NP), mkL: new Float64Array(NP), ofL: new Float64Array(NP), wrkK: new Float64Array(NP), rScan: new Float64Array(NP), fov: new Float64Array(NP), // 認知: 視野の内側・外側の cos、向きを変える速さ、気づくまでの遅れ、気づきの上がる速さ、視野の半角（rad）（能力から決まる）
     fcx: new Float64Array(NP), fcy: new Float64Array(NP), aw: new Float64Array(NP), // 認知: 向きの cos/sin（毎tick作り直す）、判断のたびに作る見えている度合い（作業用）
     tac: [tacParams(input.teams[0].tactics), tacParams(input.teams[1].tactics)], // チーム指示から作った数値（engine/tactic.js）
     changes: sortedChanges(input.changes, 'sub'), // 交代（t の順。入力から決まる値）
@@ -157,6 +158,11 @@ function setPlayerAb(m, i, ab) {
   m.sdr[i] = drainK(v[AB.STM]); m.srec[i] = recoverK(v[AB.STM]);
   fatigue(m, i); // 疲れ分を引いた今の値（vmax・acc）
   m.rgk[i] = m.slot[i] === 0 ? 1.2 + 0.05 * v[AB.GKR] : 0; // GKの届く範囲 (m)
+  m.rdK[i] = clamp(1 + K_RD * ((v[AB.POS] + v[AB.MRK]) / 2 - 10), 0.6, 1.8); // 守備の読み: 相手のパスに足が届く範囲の倍率（パスコースを読んで立つ）
+  m.mkL[i] = clamp(1 - K_MKL * (v[AB.MRK] - 10), 0.5, 1.6); // マークの見失いやすさの倍率（マークが上手いほど小さい）
+  m.ofL[i] = clamp(1 + K_OFL * (v[AB.OFF] - 10), 0.5, 1.8); // 動き出しが上手い相手ほど、守る側は見失いやすい
+  m.wrkK[i] = clamp(1 + K_WRK * (v[AB.WRK] - 10), 0.7, 1.3); // ボールを持たない動きの走りの強さ（運動量）。寄せる・戻る・支える・走り込む
+  m.sepK[i] = clamp(1 - K_SEP * (v[AB.OFF] - 10), 0.5, 1.5); // 動き出し: パスを受けるとき、相手から離れて受けられる（圧力の倍率。小さいほど楽）
   if (m.pOn) setLook(m, i); // 視野・向きを変える速さなど（認知）
 }
 
